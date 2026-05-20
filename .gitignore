@@ -1,0 +1,4 @@
+usage-widget.state.json
+*.log
+.DS_Store
+Thumbs.db
