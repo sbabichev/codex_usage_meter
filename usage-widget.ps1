@@ -268,7 +268,18 @@ function Set-TimeProgress($row, $percent) {
     $row.timeFill.Width = [Math]::Max(5, $row.timeTrack.ActualWidth * ($safePercent / 100))
 }
 
-function New-LimitRow($title, $large) {
+function Update-TimeTicks($timeBar) {
+    foreach ($child in $timeBar.Children) {
+        if ($null -eq $child.Tag -or $null -eq $child.Tag.Segments) {
+            continue
+        }
+
+        $x = $timeBar.ActualWidth * ($child.Tag.Index / $child.Tag.Segments)
+        $child.Margin = ("{0},0,0,0" -f [Math]::Round($x))
+    }
+}
+
+function New-LimitRow($title, $large, $timeSegments) {
     $panel = New-Object System.Windows.Controls.StackPanel
     $panel.Margin = "0,8,0,0"
 
@@ -347,6 +358,24 @@ function New-LimitRow($title, $large) {
     $timeBar.Children.Add($timeTrack) | Out-Null
     $timeBar.Children.Add($timeFill) | Out-Null
 
+    if ($timeSegments -gt 1) {
+        for ($tickIndex = 1; $tickIndex -lt $timeSegments; $tickIndex++) {
+            $tick = New-Object System.Windows.Controls.Border
+            $tick.Width = 1
+            $tick.Height = 6
+            $tick.CornerRadius = 0.5
+            $tick.Background = Get-Brush "#EAF3F7"
+            $tick.Opacity = 0.32
+            $tick.HorizontalAlignment = "Left"
+            $tick.VerticalAlignment = "Center"
+            $tick.Tag = [pscustomobject]@{
+                Index = $tickIndex
+                Segments = $timeSegments
+            }
+            $timeBar.Children.Add($tick) | Out-Null
+        }
+    }
+
     $panel.Children.Add($header) | Out-Null
     $panel.Children.Add($bar) | Out-Null
     $panel.Children.Add($timeTextGrid) | Out-Null
@@ -378,6 +407,7 @@ function New-LimitRow($title, $large) {
         param($sender)
         $data = $sender.Tag
         Set-TimeProgress $data $data.timePercent
+        Update-TimeTicks $sender
     })
 
     return $row
@@ -516,8 +546,8 @@ function Build-Widget {
     $content.Margin = "0,0,0,0"
     [System.Windows.Controls.Grid]::SetRow($content, 1)
 
-    $current = New-LimitRow "CURRENT SESSION" $false
-    $weekly = New-LimitRow "WEEKLY LIMIT" $false
+    $current = New-LimitRow "CURRENT SESSION" $false 5
+    $weekly = New-LimitRow "WEEKLY LIMIT" $false 7
     $content.Children.Add($current.panel) | Out-Null
 
     $content.Children.Add((New-Hairline 9 0)) | Out-Null
