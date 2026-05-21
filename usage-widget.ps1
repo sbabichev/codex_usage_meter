@@ -91,7 +91,7 @@ function Read-State {
         top = 90
         topmost = $true
         opacity = 0.96
-        refreshSeconds = 15
+        refreshSeconds = 3
     }
 
     if (-not (Test-Path $script:StatePath)) {
@@ -118,7 +118,7 @@ function Save-State($window) {
             top = [Math]::Round($window.Top)
             topmost = [bool]$window.Topmost
             opacity = [double]$window.Opacity
-            refreshSeconds = 15
+            refreshSeconds = 3
         }
         $json = $state | ConvertTo-Json -Depth 4
         [System.IO.File]::WriteAllText($script:StatePath, $json, [System.Text.Encoding]::UTF8)
@@ -194,6 +194,26 @@ function Get-TimeLeftPercent($limit) {
     return [Math]::Max(0, [Math]::Min(100, ($remainingSeconds / $windowSeconds) * 100))
 }
 
+function Test-UsableCodexRateLimits($limits) {
+    if (-not $limits) {
+        return $false
+    }
+
+    if ($limits.limit_id -and $limits.limit_id -ne "codex") {
+        return $false
+    }
+
+    if (-not $limits.primary -or -not $limits.secondary) {
+        return $false
+    }
+
+    if ($null -eq $limits.primary.used_percent -or $null -eq $limits.secondary.used_percent) {
+        return $false
+    }
+
+    return $true
+}
+
 function Get-LatestRateLimitLine {
     if (-not (Test-Path $script:CodexSessionsDir)) {
         return $null
@@ -201,32 +221,32 @@ function Get-LatestRateLimitLine {
 
     $files = Get-ChildItem -Path $script:CodexSessionsDir -Recurse -Filter *.jsonl -ErrorAction SilentlyContinue |
         Sort-Object LastWriteTime -Descending |
-        Select-Object -First 30
+        Select-Object -First 60
 
     $latest = $null
 
     foreach ($file in $files) {
-        $match = Select-String -Path $file.FullName -Pattern '"rate_limits"' -ErrorAction SilentlyContinue |
-            Select-Object -Last 1
-        if (-not $match) {
-            continue
-        }
+        $matches = Select-String -Path $file.FullName -Pattern '"rate_limits"' -ErrorAction SilentlyContinue |
+            Select-Object -Last 20
+        foreach ($match in $matches) {
+            try {
+                $event = $match.Line | ConvertFrom-Json
+                $limits = $event.payload.rate_limits
+                if (-not (Test-UsableCodexRateLimits $limits)) {
+                    continue
+                }
 
-        try {
-            $event = $match.Line | ConvertFrom-Json
-            if (-not $event.payload.rate_limits) {
+                $stamp = [DateTimeOffset]::Parse($event.timestamp)
+                if (($null -eq $latest) -or ($stamp -gt $latest.Stamp)) {
+                    $latest = [pscustomobject]@{
+                        Stamp = $stamp
+                        Event = $event
+                        File = $file.FullName
+                    }
+                }
+            } catch {
                 continue
             }
-
-            $stamp = [DateTimeOffset]::Parse($event.timestamp)
-            if (($null -eq $latest) -or ($stamp -gt $latest.Stamp)) {
-                $latest = [pscustomobject]@{
-                    Stamp = $stamp
-                    Event = $event
-                    File = $file.FullName
-                }
-            }
-        } catch {
         }
     }
 
@@ -247,11 +267,14 @@ function Get-CodexUsage {
     }
 
     $limits = $latest.Event.payload.rate_limits
+    $age = (Get-Date) - $latest.Stamp.LocalDateTime
     return [pscustomobject]@{
         ok = $true
         message = $null
         plan = $limits.plan_type
         updated = $latest.Stamp.LocalDateTime
+        isStale = ($age.TotalSeconds -gt 90)
+        staleText = if ($age.TotalSeconds -gt 90) { "Stale {0}m" -f [Math]::Max(1, [Math]::Floor($age.TotalMinutes)) } else { "" }
         primary = $limits.primary
         secondary = $limits.secondary
     }
@@ -450,7 +473,7 @@ function New-LimitRow($title, $large, $timeSegments) {
 
 function Update-LimitRow($row, $limit, $resetText, $timeText) {
     if (-not $limit) {
-        $row.value.Text = "n/a"
+        $row.value.Text = "--"
         $row.reset.Text = $resetText
         $row.left.Text = $timeText
         Set-LimitAccent $row 0 $false
@@ -473,16 +496,25 @@ function Update-Widget($controls) {
 
     if (-not $usage.ok) {
         $controls.Plan.Text = "WAIT"
-        Update-LimitRow $controls.Current $null $usage.message ""
-        Update-LimitRow $controls.Weekly $null "" ""
+        Update-LimitRow $controls.Current $null "Waiting for Codex" "No fresh data"
+        Update-LimitRow $controls.Weekly $null "Waiting for Codex" ""
         $controls.Updated.Text = "Updated " + (Get-Date).ToString("HH:mm:ss")
         return
     }
 
     $plan = if ($usage.plan) { $usage.plan.ToString().ToUpperInvariant() } else { "PLAN" }
     $controls.Plan.Text = $plan
-    Update-LimitRow $controls.Current $usage.primary (Format-BaliReset $usage.primary.resets_at) (Format-Remaining $usage.primary.resets_at)
-    Update-LimitRow $controls.Weekly $usage.secondary (Format-LocalReset $usage.secondary.resets_at) (Format-Remaining $usage.secondary.resets_at)
+    $currentReset = Format-BaliReset $usage.primary.resets_at
+    $currentLeft = Format-Remaining $usage.primary.resets_at
+    $weeklyReset = Format-LocalReset $usage.secondary.resets_at
+    $weeklyLeft = Format-Remaining $usage.secondary.resets_at
+    if ($usage.isStale) {
+        $currentLeft = $usage.staleText
+        $weeklyLeft = $usage.staleText
+    }
+
+    Update-LimitRow $controls.Current $usage.primary $currentReset $currentLeft
+    Update-LimitRow $controls.Weekly $usage.secondary $weeklyReset $weeklyLeft
     $controls.Updated.Text = "Updated " + $usage.updated.ToString("HH:mm:ss")
 }
 
@@ -649,7 +681,7 @@ function Build-Widget {
     })
 
     $timer = New-Object System.Windows.Threading.DispatcherTimer
-    $timer.Interval = [TimeSpan]::FromSeconds([Math]::Max(5, [int]$state.refreshSeconds))
+    $timer.Interval = [TimeSpan]::FromSeconds([Math]::Max(1, [int]$state.refreshSeconds))
     $timer.Add_Tick({ Update-Widget $controls })
     $timer.Start()
 

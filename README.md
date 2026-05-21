@@ -52,7 +52,7 @@ The widget scans the newest session files, finds the latest `token_count` event 
 - `resets_at` and `window_minutes` for reset and time-remaining progress;
 - `plan_type` for the wordmark tier.
 
-The widget refreshes every 15 seconds.
+The widget refreshes every 3 seconds and ignores non-Codex or incomplete rate-limit events.
 
 ## Controls
 
