@@ -65,6 +65,8 @@ The widget refreshes every 15 seconds.
 
 - `usage-widget.ps1` - WPF widget implementation.
 - `start-usage-widget.cmd` - double-click launcher.
+- `assets/codex-usage-meter.ico` - Lucide-inspired gauge icon for the tray/window.
+- `tools/create-icon.ps1` - regenerates the icon.
 - `usage-widget.state.json` - local window state, generated automatically and ignored by git.
 
 ## Privacy

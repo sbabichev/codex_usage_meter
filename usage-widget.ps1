@@ -9,6 +9,7 @@ $ErrorActionPreference = "Stop"
 $script:AppDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $script:StatePath = Join-Path $script:AppDir "usage-widget.state.json"
 $script:CodexSessionsDir = Join-Path $env:USERPROFILE ".codex\sessions"
+$script:IconPath = Join-Path $script:AppDir "assets\codex-usage-meter.ico"
 $script:WidgetWidth = 360
 $script:WidgetHeight = 236
 
@@ -488,7 +489,11 @@ function Update-Widget($controls) {
 function New-TrayIcon($window) {
     $tray = New-Object System.Windows.Forms.NotifyIcon
     $tray.Text = "Codex Usage Meter"
-    $tray.Icon = [System.Drawing.SystemIcons]::Application
+    if (Test-Path $script:IconPath) {
+        $tray.Icon = New-Object System.Drawing.Icon $script:IconPath
+    } else {
+        $tray.Icon = [System.Drawing.SystemIcons]::Application
+    }
     $tray.Visible = $true
 
     $menu = New-Object System.Windows.Forms.ContextMenuStrip
@@ -516,6 +521,10 @@ function Build-Widget {
 
     $window = New-Object System.Windows.Window
     $window.Title = "Codex Usage Meter"
+    if (Test-Path $script:IconPath) {
+        $iconStream = [System.IO.File]::OpenRead($script:IconPath)
+        $window.Icon = [System.Windows.Media.Imaging.BitmapFrame]::Create($iconStream)
+    }
     $window.Width = $script:WidgetWidth
     $window.Height = $script:WidgetHeight
     $window.MinWidth = $script:WidgetWidth
