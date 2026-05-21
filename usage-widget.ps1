@@ -265,7 +265,21 @@ function Set-Progress($row, $percent) {
 function Set-TimeProgress($row, $percent) {
     $safePercent = [Math]::Max(0, [Math]::Min(100, [double]$percent))
     $row.timePercent = $safePercent
-    $row.timeFill.Width = [Math]::Max(5, $row.timeTrack.ActualWidth * ($safePercent / 100))
+    $accent = if ($safePercent -le 12) {
+        "#FF8A3D"
+    } elseif ($safePercent -le 30) {
+        "#FFC857"
+    } else {
+        "#D6E2E8"
+    }
+
+    $row.timeFill.Width = [Math]::Max(7, $row.timeTrack.ActualWidth * ($safePercent / 100))
+    $row.timeFill.Background = Get-Brush $accent
+    $row.timeFill.Opacity = if ($safePercent -le 30) { 0.86 } else { 0.64 }
+    if ($row.timeFill.Effect) {
+        $row.timeFill.Effect.Color = Get-Color $accent
+        $row.timeFill.Effect.Opacity = if ($safePercent -le 30) { 0.42 } else { 0.18 }
+    }
 }
 
 function Update-TimeTicks($timeBar) {
@@ -341,17 +355,23 @@ function New-LimitRow($title, $large, $timeSegments) {
     $timeTextGrid.Children.Add($left) | Out-Null
 
     $timeTrack = New-Object System.Windows.Controls.Border
-    $timeTrack.Height = 2
-    $timeTrack.CornerRadius = 1.5
+    $timeTrack.Height = 5
+    $timeTrack.CornerRadius = 2.5
     $timeTrack.Background = Get-Brush "#62737D"
-    $timeTrack.Opacity = 0.18
+    $timeTrack.Opacity = 0.28
 
     $timeFill = New-Object System.Windows.Controls.Border
-    $timeFill.Height = 2
-    $timeFill.CornerRadius = 1.5
-    $timeFill.HorizontalAlignment = "Left"
+    $timeFill.Height = 5
+    $timeFill.CornerRadius = 2.5
+    $timeFill.HorizontalAlignment = "Right"
     $timeFill.Background = Get-Brush "#D6E2E8"
-    $timeFill.Opacity = 0.52
+    $timeFill.Opacity = 0.64
+    $timeFill.Effect = New-Object System.Windows.Media.Effects.DropShadowEffect -Property @{
+        BlurRadius = 8
+        ShadowDepth = 0
+        Opacity = 0.18
+        Color = [System.Windows.Media.ColorConverter]::ConvertFromString("#D6E2E8")
+    }
 
     $timeBar = New-Object System.Windows.Controls.Grid
     $timeBar.Margin = "0,5,0,0"
@@ -362,10 +382,10 @@ function New-LimitRow($title, $large, $timeSegments) {
         for ($tickIndex = 1; $tickIndex -lt $timeSegments; $tickIndex++) {
             $tick = New-Object System.Windows.Controls.Border
             $tick.Width = 1
-            $tick.Height = 6
+            $tick.Height = 7
             $tick.CornerRadius = 0.5
             $tick.Background = Get-Brush "#EAF3F7"
-            $tick.Opacity = 0.32
+            $tick.Opacity = 0.38
             $tick.HorizontalAlignment = "Left"
             $tick.VerticalAlignment = "Center"
             $tick.Tag = [pscustomobject]@{
