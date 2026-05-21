@@ -11,7 +11,7 @@ $script:StatePath = Join-Path $script:AppDir "usage-widget.state.json"
 $script:CodexSessionsDir = Join-Path $env:USERPROFILE ".codex\sessions"
 $script:IconPath = Join-Path $script:AppDir "assets\codex-usage-meter.ico"
 $script:WidgetWidth = 360
-$script:WidgetHeight = 236
+$script:WidgetHeight = 262
 
 function Get-Brush($hex) {
     return New-Object System.Windows.Media.SolidColorBrush ([System.Windows.Media.ColorConverter]::ConvertFromString($hex))
@@ -192,6 +192,94 @@ function Get-TimeLeftPercent($limit) {
     }
 
     return [Math]::Max(0, [Math]::Min(100, ($remainingSeconds / $windowSeconds) * 100))
+}
+
+function Get-ElapsedPercent($limit) {
+    return 100 - (Get-TimeLeftPercent $limit)
+}
+
+function Get-UsageHint($primary, $secondary, $isStale) {
+    if ($isStale) {
+        return [pscustomobject]@{
+            Text = "Data is stale. Open Codex activity to refresh limits."
+            Color = "#FFC857"
+        }
+    }
+
+    if (-not $primary -or -not $secondary) {
+        return [pscustomobject]@{
+            Text = "Waiting for fresh Codex limit telemetry."
+            Color = "#D6E2E8"
+        }
+    }
+
+    $sessionUsed = [double]$primary.used_percent
+    $sessionElapsed = Get-ElapsedPercent $primary
+    $weeklyUsed = [double]$secondary.used_percent
+    $weeklyElapsed = Get-ElapsedPercent $secondary
+    $sessionDelta = $sessionUsed - $sessionElapsed
+    $weeklyDelta = $weeklyUsed - $weeklyElapsed
+
+    if ($sessionUsed -ge 92) {
+        return [pscustomobject]@{
+            Text = "Session limit is nearly spent. Save heavy work for reset."
+            Color = "#FF8A3D"
+        }
+    }
+
+    if ($sessionElapsed -le 12 -and $sessionUsed -ge 30) {
+        return [pscustomobject]@{
+            Text = "Fast start: session usage is ahead of the clock."
+            Color = "#FFC857"
+        }
+    }
+
+    if ($sessionDelta -ge 25) {
+        return [pscustomobject]@{
+            Text = "High burn rate. Slow down or switch to lighter tasks."
+            Color = "#FFC857"
+        }
+    }
+
+    if ($sessionElapsed -ge 70 -and $sessionUsed -le 45) {
+        return [pscustomobject]@{
+            Text = "Plenty left in this session. No need to economize."
+            Color = "#A6FF4F"
+        }
+    }
+
+    if ($weeklyElapsed -ge 75 -and $weeklyUsed -le 35) {
+        return [pscustomobject]@{
+            Text = "Week is late and usage is low. You have room to spend."
+            Color = "#A6FF4F"
+        }
+    }
+
+    if ($weeklyDelta -ge 20) {
+        return [pscustomobject]@{
+            Text = "Weekly pace is hot. Keep an eye on large runs."
+            Color = "#FFC857"
+        }
+    }
+
+    if ($weeklyElapsed -ge 45 -and $weeklyUsed -le 25) {
+        return [pscustomobject]@{
+            Text = "Weekly limit is underused for this point in the week."
+            Color = "#A6FF4F"
+        }
+    }
+
+    if ($sessionDelta -le -20 -and $sessionUsed -le 55) {
+        return [pscustomobject]@{
+            Text = "Comfortable pace. You can keep working normally."
+            Color = "#A6FF4F"
+        }
+    }
+
+    return [pscustomobject]@{
+        Text = "Usage pace looks balanced."
+        Color = "#D6E2E8"
+    }
 }
 
 function Test-UsableCodexRateLimits($limits) {
@@ -496,6 +584,9 @@ function Update-Widget($controls) {
         $controls.Plan.Text = "WAIT"
         Update-LimitRow $controls.Current $null "Waiting for Codex" "No fresh data"
         Update-LimitRow $controls.Weekly $null "Waiting for Codex" ""
+        $hint = Get-UsageHint $null $null $false
+        $controls.Hint.Text = $hint.Text
+        $controls.Hint.Foreground = Get-Brush $hint.Color
         $controls.Updated.Text = "Updated " + (Get-Date).ToString("HH:mm:ss")
         return
     }
@@ -513,6 +604,9 @@ function Update-Widget($controls) {
 
     Update-LimitRow $controls.Current $usage.primary $currentReset $currentLeft
     Update-LimitRow $controls.Weekly $usage.secondary $weeklyReset $weeklyLeft
+    $hint = Get-UsageHint $usage.primary $usage.secondary $usage.isStale
+    $controls.Hint.Text = $hint.Text
+    $controls.Hint.Foreground = Get-Brush $hint.Color
     $controls.Updated.Text = "Updated " + $usage.updated.ToString("HH:mm:ss")
 }
 
@@ -625,7 +719,13 @@ function Build-Widget {
 
     $content.Children.Add((New-Hairline 9 0)) | Out-Null
     $content.Children.Add($weekly.panel) | Out-Null
+    $content.Children.Add((New-Hairline 9 0)) | Out-Null
 
+    $hint = New-TextBlock "Usage pace looks balanced." 9.5 "Regular" "#D6E2E8"
+    $hint.Margin = "0,7,0,0"
+    $hint.Opacity = 0.78
+
+    $content.Children.Add($hint) | Out-Null
     $root.Children.Add($content) | Out-Null
 
     $updated = New-TextBlock "" 1 "Normal" "#AAB4BB"
@@ -638,6 +738,7 @@ function Build-Widget {
         Plan = $plan
         Current = $current
         Weekly = $weekly
+        Hint = $hint
         Updated = $updated
     }
 
