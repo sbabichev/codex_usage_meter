@@ -12,6 +12,7 @@ $script:CodexSessionsDir = Join-Path $env:USERPROFILE ".codex\sessions"
 $script:IconPath = Join-Path $script:AppDir "assets\codex-usage-meter.ico"
 $script:WidgetWidth = 360
 $script:WidgetHeight = 262
+$script:StaleAfterSeconds = 900
 
 function Get-Brush($hex) {
     return New-Object System.Windows.Media.SolidColorBrush ([System.Windows.Media.ColorConverter]::ConvertFromString($hex))
@@ -201,7 +202,7 @@ function Get-ElapsedPercent($limit) {
 function Get-UsageHint($primary, $secondary, $isStale) {
     if ($isStale) {
         return [pscustomobject]@{
-            Text = "Data is stale. Open Codex activity to refresh limits."
+            Text = "Telemetry paused. Values may lag until Codex reports again."
             Color = "#FFC857"
         }
     }
@@ -361,8 +362,8 @@ function Get-CodexUsage {
         message = $null
         plan = $limits.plan_type
         updated = $latest.Stamp.LocalDateTime
-        isStale = ($age.TotalSeconds -gt 90)
-        staleText = if ($age.TotalSeconds -gt 90) { "Stale {0}m" -f [Math]::Max(1, [Math]::Floor($age.TotalMinutes)) } else { "" }
+        isStale = ($age.TotalSeconds -gt $script:StaleAfterSeconds)
+        staleText = if ($age.TotalSeconds -gt $script:StaleAfterSeconds) { "Updated {0}m ago" -f [Math]::Max(1, [Math]::Floor($age.TotalMinutes)) } else { "" }
         primary = $limits.primary
         secondary = $limits.secondary
     }
@@ -597,11 +598,6 @@ function Update-Widget($controls) {
     $currentLeft = Format-Remaining $usage.primary.resets_at
     $weeklyReset = Format-LocalReset $usage.secondary.resets_at
     $weeklyLeft = Format-Remaining $usage.secondary.resets_at
-    if ($usage.isStale) {
-        $currentLeft = $usage.staleText
-        $weeklyLeft = $usage.staleText
-    }
-
     Update-LimitRow $controls.Current $usage.primary $currentReset $currentLeft
     Update-LimitRow $controls.Weekly $usage.secondary $weeklyReset $weeklyLeft
     $hint = Get-UsageHint $usage.primary $usage.secondary $usage.isStale
