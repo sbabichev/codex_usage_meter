@@ -136,7 +136,7 @@ function Read-State {
         left = 120
         top = 90
         topmost = $true
-        opacity = 0.96
+        opacity = 1.0
         refreshSeconds = 3
         usageFloor = $null
     }
@@ -164,7 +164,7 @@ function Save-State($window) {
             left = [Math]::Round($window.Left)
             top = [Math]::Round($window.Top)
             topmost = [bool]$window.Topmost
-            opacity = [double]$window.Opacity
+            opacity = 1.0
             refreshSeconds = 3
             usageFloor = [ordered]@{
                 windowKey = if ($script:UsageFloorState.WindowKey) { [string]$script:UsageFloorState.WindowKey } else { "" }
@@ -1048,10 +1048,28 @@ function Show-UsageWindow($window) {
     $window.Activate() | Out-Null
 }
 
-function Set-CompactWindowPlacement($window) {
+function Set-CompactWindowPlacement($window, $anchorWindow) {
+    $screen = $null
+    if ($anchorWindow) {
+        $point = New-Object System.Drawing.Point ([int]$anchorWindow.Left + 8), ([int]$anchorWindow.Top + 8)
+        $screen = [System.Windows.Forms.Screen]::FromPoint($point)
+    }
+
+    if (-not $screen) {
+        $screen = [System.Windows.Forms.Screen]::PrimaryScreen
+    }
+
+    $area = $screen.WorkingArea
+    $window.Left = $area.Right - $window.Width - 12
+    $window.Top = $area.Bottom - $window.Height - 8
+}
+
+function Show-CompactAtPrimaryBottom($window) {
     $area = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
     $window.Left = $area.Right - $window.Width - 12
     $window.Top = $area.Bottom - $window.Height - 8
+    $window.Show()
+    $window.Activate() | Out-Null
 }
 
 function New-CompactBar {
@@ -1108,21 +1126,24 @@ function New-CompactStatusWindow($detailWindow) {
     $compact.WindowStyle = "None"
     $compact.AllowsTransparency = $true
     $compact.Background = [System.Windows.Media.Brushes]::Transparent
+    $compact.UseLayoutRounding = $true
+    $compact.SnapsToDevicePixels = $true
     $compact.ResizeMode = "NoResize"
     $compact.Topmost = $true
     $compact.ShowInTaskbar = $false
-    Set-CompactWindowPlacement $compact
+    Set-CompactWindowPlacement $compact $detailWindow
 
     $outer = New-Object System.Windows.Controls.Border
+    $outer.Margin = "3"
     $outer.Padding = "10,6,10,6"
     $outer.CornerRadius = 10
     $outer.BorderThickness = 1
-    $outer.BorderBrush = Get-Brush "#7E8E96"
-    $outer.Background = Get-Brush "#EA0E1821"
+    $outer.BorderBrush = Get-Brush "#B8C7CF"
+    $outer.Background = Get-Brush "#EA1A2630"
     $outer.Effect = New-Object System.Windows.Media.Effects.DropShadowEffect -Property @{
-        BlurRadius = 18
+        BlurRadius = 6
         ShadowDepth = 0
-        Opacity = 0.34
+        Opacity = 0.16
         Color = [System.Windows.Media.ColorConverter]::ConvertFromString("#02080E")
     }
 
@@ -1254,10 +1275,18 @@ function New-TrayIcon($window, $compact) {
     $tray.Visible = $true
 
     $menu = New-Object System.Windows.Forms.ContextMenuStrip
-    $showItem = $menu.Items.Add("Show")
-    $compactItem = $menu.Items.Add("Hide Compact Status")
-    $dashboardItem = $menu.Items.Add("Open Codex Usage Dashboard")
-    $exitItem = $menu.Items.Add("Exit")
+    $showItem = New-Object System.Windows.Forms.ToolStripMenuItem "Show"
+    $compactItem = New-Object System.Windows.Forms.ToolStripMenuItem "Hide Compact Status"
+    $showCompactItem = New-Object System.Windows.Forms.ToolStripMenuItem "Show Compact Now"
+    $locateCompactItem = New-Object System.Windows.Forms.ToolStripMenuItem "Locate Compact Status"
+    $dashboardItem = New-Object System.Windows.Forms.ToolStripMenuItem "Open Codex Usage Dashboard"
+    $exitItem = New-Object System.Windows.Forms.ToolStripMenuItem "Exit"
+    $menu.Items.Add($showItem) | Out-Null
+    $menu.Items.Add($compactItem) | Out-Null
+    $menu.Items.Add($showCompactItem) | Out-Null
+    $menu.Items.Add($locateCompactItem) | Out-Null
+    $menu.Items.Add($dashboardItem) | Out-Null
+    $menu.Items.Add($exitItem) | Out-Null
     $tray.ContextMenuStrip = $menu
 
     $showAction = {
@@ -1267,18 +1296,47 @@ function New-TrayIcon($window, $compact) {
     $showItem.Add_Click($showAction)
     $tray.Add_DoubleClick($showAction)
     $compactItem.Add_Click({
+        try {
+            if ($null -eq $compact -or $null -eq $compact.Window) {
+                return
+            }
+
+            if ($compact.Window.IsVisible) {
+                $compact.Window.Hide()
+            } else {
+                Set-CompactWindowPlacement $compact.Window $window
+                $compact.Window.Show()
+            }
+        } catch {
+            [System.Windows.Forms.MessageBox]::Show(
+                ("Compact status toggle failed: {0}" -f $_.Exception.Message),
+                "Codex Usage Meter",
+                [System.Windows.Forms.MessageBoxButtons]::OK,
+                [System.Windows.Forms.MessageBoxIcon]::Warning
+            ) | Out-Null
+        }
+    })
+    $showCompactItem.Add_Click({
         if ($null -eq $compact -or $null -eq $compact.Window) {
             return
         }
 
-        if ($compact.Window.IsVisible) {
-            $compact.Window.Hide()
-            $compactItem.Text = "Show Compact Status"
-        } else {
-            Set-CompactWindowPlacement $compact.Window
-            $compact.Window.Show()
-            $compactItem.Text = "Hide Compact Status"
+        Set-CompactWindowPlacement $compact.Window $window
+        $compact.Window.Show()
+        $compact.Window.Activate() | Out-Null
+    })
+    $locateCompactItem.Add_Click({
+        if ($null -eq $compact -or $null -eq $compact.Window) {
+            return
         }
+
+        Show-CompactAtPrimaryBottom $compact.Window
+        [System.Windows.Forms.MessageBox]::Show(
+            ("Compact status at X={0}, Y={1}, W={2}, H={3}" -f [int]$compact.Window.Left, [int]$compact.Window.Top, [int]$compact.Window.Width, [int]$compact.Window.Height),
+            "Codex Usage Meter",
+            [System.Windows.Forms.MessageBoxButtons]::OK,
+            [System.Windows.Forms.MessageBoxIcon]::Information
+        ) | Out-Null
     })
     $dashboardItem.Add_Click({
         [System.Diagnostics.Process]::Start($script:CodexUsageDashboardUrl) | Out-Null
@@ -1309,11 +1367,13 @@ function Build-Widget {
     $window.WindowStyle = "None"
     $window.AllowsTransparency = $true
     $window.Background = [System.Windows.Media.Brushes]::Transparent
+    $window.UseLayoutRounding = $true
+    $window.SnapsToDevicePixels = $true
     $window.ResizeMode = "NoResize"
     $window.Topmost = [bool]$state.topmost
     $window.Left = [double]$state.left
     $window.Top = [double]$state.top
-    $window.Opacity = [double]$state.opacity
+    $window.Opacity = 1.0
     $window.ShowInTaskbar = $false
 
     $outer = New-Object System.Windows.Controls.Border
@@ -1322,11 +1382,11 @@ function Build-Widget {
     $outer.CornerRadius = 20
     $outer.BorderThickness = 1
     $outer.BorderBrush = Get-Brush "#AAB7BD"
-    $outer.Background = Get-Brush "#D70E1821"
+    $outer.Background = Get-Brush "#E00E1821"
     $outer.Effect = New-Object System.Windows.Media.Effects.DropShadowEffect -Property @{
-        BlurRadius = 34
+        BlurRadius = 8
         ShadowDepth = 0
-        Opacity = 0.46
+        Opacity = 0.18
         Color = [System.Windows.Media.ColorConverter]::ConvertFromString("#02080E")
     }
 
@@ -1422,7 +1482,12 @@ function Build-Widget {
     }
     $outer.Add_MouseLeftButtonDown($dragHandler)
 
-    $window.Add_LocationChanged({ Save-State $window })
+    $window.Add_LocationChanged({
+        Save-State $window
+        if ($null -ne $compact -and $null -ne $compact.Window -and $compact.Window.IsVisible) {
+            Set-CompactWindowPlacement $compact.Window $window
+        }
+    })
     $window.Add_Closed({
         Save-State $window
         if ($null -ne $compact -and $null -ne $compact.Window) {
