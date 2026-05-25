@@ -45,7 +45,7 @@ This repository contains a Windows PowerShell + WPF tray-style widget for monito
   - filled = how much of the time window has passed
   - empty right side = time remaining
 - Smart hints at the bottom analyze usage pace vs elapsed time and weekly pace.
-- A compact last-activity line shows recent limit movement and local token estimates; its tooltip can contain fuller token details.
+- Last-activity line shows recent limit movement and local token estimates; its tooltip can contain fuller token details.
 
 ## Recent Baseline Commits
 
