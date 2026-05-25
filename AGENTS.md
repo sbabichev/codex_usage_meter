@@ -26,7 +26,7 @@ This repository contains a Windows PowerShell + WPF tray-style widget for monito
 
 ## UI Layout
 
-- Widget uses a compact side-by-side Codex and MiniMax layout.
+- Side-by-side Codex and MiniMax layout.
 - Sections use brand-specific colors:
   - Codex: cyan (#6FE8FF)
   - MINIMAX: red-orange (#FF8A3D)
@@ -40,7 +40,7 @@ This repository contains a Windows PowerShell + WPF tray-style widget for monito
   - `90+`: orange
 - Time bars fill left-to-right by elapsed time
 - Smart hints at the bottom analyze usage pace vs elapsed time and weekly pace
-- Compact last-activity line with token details in tooltip
+- Last-activity line with token details in tooltip
 
 ## Recent Baseline Commits
 

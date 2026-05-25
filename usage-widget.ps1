@@ -16,8 +16,6 @@ $script:IconPath = Join-Path $script:AppDir "assets\codex-usage-meter.ico"
 $script:CodexUsageDashboardUrl = "https://chatgpt.com/codex/settings/usage"
 $script:WidgetWidth = 360
 $script:WidgetHeight = 240
-$script:CompactWidth = 292
-$script:CompactHeight = 42
 $script:StaleAfterSeconds = 900
 $script:MinimaxDefaultRefreshSeconds = 300
 $script:MinimaxRemoteState = @{
@@ -1704,187 +1702,6 @@ function Show-UsageWindow($window) {
     $window.Activate() | Out-Null
 }
 
-function Set-CompactWindowPlacement($window, $anchorWindow) {
-    $screen = $null
-    if ($anchorWindow) {
-        $point = New-Object System.Drawing.Point ([int]$anchorWindow.Left + 8), ([int]$anchorWindow.Top + 8)
-        $screen = [System.Windows.Forms.Screen]::FromPoint($point)
-    }
-
-    if (-not $screen) {
-        $screen = [System.Windows.Forms.Screen]::PrimaryScreen
-    }
-
-    $area = $screen.WorkingArea
-    $window.Left = $area.Right - $window.Width - 12
-    $window.Top = $area.Bottom - $window.Height - 8
-}
-
-function Show-CompactAtPrimaryBottom($window) {
-    $area = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
-    $window.Left = $area.Right - $window.Width - 12
-    $window.Top = $area.Bottom - $window.Height - 8
-    $window.Show()
-    $window.Activate() | Out-Null
-}
-
-function New-CompactBar {
-    $track = New-Object System.Windows.Controls.Border
-    $track.Height = 3
-    $track.CornerRadius = 1.5
-    $track.Background = Get-Brush "#60717B"
-    $track.Opacity = 0.4
-
-    $fill = New-Object System.Windows.Controls.Border
-    $fill.Height = 3
-    $fill.CornerRadius = 1.5
-    $fill.HorizontalAlignment = "Left"
-    $fill.Background = Get-Brush "#A6FF4F"
-
-    $bar = New-Object System.Windows.Controls.Grid
-    $bar.Children.Add($track) | Out-Null
-    $bar.Children.Add($fill) | Out-Null
-
-    $row = [pscustomobject]@{
-        Bar = $bar
-        Fill = $fill
-        Percent = 0
-    }
-
-    $bar.Tag = $row
-    $bar.Add_SizeChanged({
-        param($sender)
-        $data = $sender.Tag
-        $safePercent = [Math]::Max(0, [Math]::Min(100, [double]$data.Percent))
-        $data.Fill.Width = if ($safePercent -le 0) { 0 } else { [Math]::Max(4, $sender.ActualWidth * ($safePercent / 100)) }
-    })
-
-    return $row
-}
-
-function Set-CompactProgress($row, $percent, $enabled) {
-    $safePercent = [Math]::Max(0, [Math]::Min(100, [double]$percent))
-    $row.Percent = $safePercent
-    $accent = if ($enabled) { Get-LimitAccent $safePercent } else { "#6F7D85" }
-    $row.Fill.Background = Get-Brush $accent
-    $row.Fill.Width = if ($safePercent -le 0) { 0 } else { [Math]::Max(4, $row.Bar.ActualWidth * ($safePercent / 100)) }
-}
-
-function New-CompactStatusWindow($detailWindow) {
-    $compact = New-Object System.Windows.Window
-    $compact.Title = "Codex Usage Meter Compact"
-    $compact.Width = $script:CompactWidth
-    $compact.Height = $script:CompactHeight
-    $compact.MinWidth = $script:CompactWidth
-    $compact.MaxWidth = $script:CompactWidth
-    $compact.MinHeight = $script:CompactHeight
-    $compact.MaxHeight = $script:CompactHeight
-    $compact.WindowStyle = "None"
-    $compact.AllowsTransparency = $true
-    $compact.Background = [System.Windows.Media.Brushes]::Transparent
-    $compact.UseLayoutRounding = $true
-    $compact.SnapsToDevicePixels = $true
-    $compact.ResizeMode = "NoResize"
-    $compact.Topmost = $true
-    $compact.ShowInTaskbar = $false
-    Set-CompactWindowPlacement $compact $detailWindow
-
-    $outer = New-Object System.Windows.Controls.Border
-    $outer.Margin = "3"
-    $outer.Padding = "10,6,10,6"
-    $outer.CornerRadius = 10
-    $outer.BorderThickness = 1
-    $outer.BorderBrush = Get-Brush "#B8C7CF"
-    $outer.Background = Get-Brush "#EA1A2630"
-    $outer.Effect = New-Object System.Windows.Media.Effects.DropShadowEffect -Property @{
-        BlurRadius = 6
-        ShadowDepth = 0
-        Opacity = 0.16
-        Color = [System.Windows.Media.ColorConverter]::ConvertFromString("#02080E")
-    }
-
-    $root = New-Object System.Windows.Controls.Grid
-    $root.RowDefinitions.Add((New-Object System.Windows.Controls.RowDefinition -Property @{ Height = "Auto" }))
-    $root.RowDefinitions.Add((New-Object System.Windows.Controls.RowDefinition -Property @{ Height = "Auto" }))
-
-    $line = New-Object System.Windows.Controls.Grid
-    $line.ColumnDefinitions.Add((New-Object System.Windows.Controls.ColumnDefinition -Property @{ Width = "Auto" }))
-    $line.ColumnDefinitions.Add((New-Object System.Windows.Controls.ColumnDefinition))
-    $line.ColumnDefinitions.Add((New-Object System.Windows.Controls.ColumnDefinition -Property @{ Width = "Auto" }))
-
-    $brand = New-TextBlock "Codex" 10 "SemiBold" "#F6FAFC"
-    $brand.Opacity = 0.72
-    $brand.Margin = "0,0,10,0"
-    $status = New-TextBlock "S --   W --" 12 "SemiBold" "#D6E2E8"
-    [System.Windows.Controls.Grid]::SetColumn($status, 1)
-    $time = New-TextBlock "--" 10 "Regular" "#C8D2D8"
-    $time.Margin = "10,1,0,0"
-    [System.Windows.Controls.Grid]::SetColumn($time, 2)
-    $line.Children.Add($brand) | Out-Null
-    $line.Children.Add($status) | Out-Null
-    $line.Children.Add($time) | Out-Null
-
-    $bars = New-Object System.Windows.Controls.Grid
-    $bars.Margin = "0,5,0,0"
-    $bars.ColumnDefinitions.Add((New-Object System.Windows.Controls.ColumnDefinition))
-    $bars.ColumnDefinitions.Add((New-Object System.Windows.Controls.ColumnDefinition -Property @{ Width = "8" }))
-    $bars.ColumnDefinitions.Add((New-Object System.Windows.Controls.ColumnDefinition))
-    [System.Windows.Controls.Grid]::SetRow($bars, 1)
-
-    $sessionBar = New-CompactBar
-    $weeklyBar = New-CompactBar
-    [System.Windows.Controls.Grid]::SetColumn($weeklyBar.Bar, 2)
-    $bars.Children.Add($sessionBar.Bar) | Out-Null
-    $bars.Children.Add($weeklyBar.Bar) | Out-Null
-
-    $root.Children.Add($line) | Out-Null
-    $root.Children.Add($bars) | Out-Null
-    $outer.Child = $root
-    $compact.Content = $outer
-
-    $outer.Add_MouseLeftButtonDown({
-        param($sender, $event)
-        if ($event.ClickCount -ge 2) {
-            Show-UsageWindow $detailWindow
-        }
-    })
-
-    $compact.Show()
-
-    return [pscustomobject]@{
-        Window = $compact
-        Status = $status
-        Time = $time
-        SessionBar = $sessionBar
-        WeeklyBar = $weeklyBar
-    }
-}
-
-function Update-CompactStatus($compact, $usage, $activity) {
-    if (-not $compact) {
-        return
-    }
-
-    if (-not $usage.ok) {
-        $compact.Status.Text = "Waiting for limits"
-        $compact.Status.Foreground = Get-Brush "#D6E2E8"
-        $compact.Time.Text = "WAIT"
-        Set-CompactProgress $compact.SessionBar 0 $false
-        Set-CompactProgress $compact.WeeklyBar 0 $false
-        $compact.Window.ToolTip = Format-ActivityTooltip $null $activity
-        return
-    }
-
-    $sessionPercent = [Math]::Round([double]$usage.primary.used_percent)
-    $weeklyPercent = [Math]::Round([double]$usage.secondary.used_percent)
-    $compact.Status.Text = "S {0}%   W {1}%" -f $sessionPercent, $weeklyPercent
-    $compact.Status.Foreground = Get-Brush (Get-LimitAccent ([Math]::Max($sessionPercent, $weeklyPercent)))
-    $compact.Time.Text = Format-Remaining $usage.primary.resets_at
-    Set-CompactProgress $compact.SessionBar $sessionPercent $true
-    Set-CompactProgress $compact.WeeklyBar $weeklyPercent $true
-    $compact.Window.ToolTip = Format-ActivityTooltip $usage $activity
-}
-
 function Update-Widget($controls) {
     $usage = Get-CodexUsage
     $activity = Get-TokenActivitySummary
@@ -1900,7 +1717,6 @@ function Update-Widget($controls) {
         $controls.Activity.Text = Format-ActivityText $null $activity
         $controls.Activity.ToolTip = Format-ActivityTooltip $null $activity
         $controls.Updated.Text = "Updated " + (Get-Date).ToString("HH:mm:ss")
-        Update-CompactStatus $controls.Compact $usage $activity
         return
     }
 
@@ -1930,10 +1746,9 @@ function Update-Widget($controls) {
     $controls.Activity.Text = Format-ActivityText $usage $activity
     $controls.Activity.ToolTip = Format-ActivityTooltip $usage $activity
     $controls.Updated.Text = "Updated " + $usage.updated.ToString("HH:mm:ss")
-    Update-CompactStatus $controls.Compact $usage $activity
 }
 
-function New-TrayIcon($window, $compact) {
+function New-TrayIcon($window) {
     $tray = New-Object System.Windows.Forms.NotifyIcon
     $tray.Text = "Codex Usage Meter"
     if (Test-Path $script:IconPath) {
@@ -1945,15 +1760,9 @@ function New-TrayIcon($window, $compact) {
 
     $menu = New-Object System.Windows.Forms.ContextMenuStrip
     $showItem = New-Object System.Windows.Forms.ToolStripMenuItem "Show"
-    $compactItem = New-Object System.Windows.Forms.ToolStripMenuItem "Hide Compact Status"
-    $showCompactItem = New-Object System.Windows.Forms.ToolStripMenuItem "Show Compact Now"
-    $locateCompactItem = New-Object System.Windows.Forms.ToolStripMenuItem "Locate Compact Status"
     $dashboardItem = New-Object System.Windows.Forms.ToolStripMenuItem "Open Codex Usage Dashboard"
     $exitItem = New-Object System.Windows.Forms.ToolStripMenuItem "Exit"
     $menu.Items.Add($showItem) | Out-Null
-    $menu.Items.Add($compactItem) | Out-Null
-    $menu.Items.Add($showCompactItem) | Out-Null
-    $menu.Items.Add($locateCompactItem) | Out-Null
     $menu.Items.Add($dashboardItem) | Out-Null
     $menu.Items.Add($exitItem) | Out-Null
     $tray.ContextMenuStrip = $menu
@@ -1964,49 +1773,6 @@ function New-TrayIcon($window, $compact) {
 
     $showItem.Add_Click($showAction)
     $tray.Add_DoubleClick($showAction)
-    $compactItem.Add_Click({
-        try {
-            if ($null -eq $compact -or $null -eq $compact.Window) {
-                return
-            }
-
-            if ($compact.Window.IsVisible) {
-                $compact.Window.Hide()
-            } else {
-                Set-CompactWindowPlacement $compact.Window $window
-                $compact.Window.Show()
-            }
-        } catch {
-            [System.Windows.Forms.MessageBox]::Show(
-                ("Compact status toggle failed: {0}" -f $_.Exception.Message),
-                "Codex Usage Meter",
-                [System.Windows.Forms.MessageBoxButtons]::OK,
-                [System.Windows.Forms.MessageBoxIcon]::Warning
-            ) | Out-Null
-        }
-    })
-    $showCompactItem.Add_Click({
-        if ($null -eq $compact -or $null -eq $compact.Window) {
-            return
-        }
-
-        Set-CompactWindowPlacement $compact.Window $window
-        $compact.Window.Show()
-        $compact.Window.Activate() | Out-Null
-    })
-    $locateCompactItem.Add_Click({
-        if ($null -eq $compact -or $null -eq $compact.Window) {
-            return
-        }
-
-        Show-CompactAtPrimaryBottom $compact.Window
-        [System.Windows.Forms.MessageBox]::Show(
-            ("Compact status at X={0}, Y={1}, W={2}, H={3}" -f [int]$compact.Window.Left, [int]$compact.Window.Top, [int]$compact.Window.Width, [int]$compact.Window.Height),
-            "Codex Usage Meter",
-            [System.Windows.Forms.MessageBoxButtons]::OK,
-            [System.Windows.Forms.MessageBoxIcon]::Information
-        ) | Out-Null
-    })
     $dashboardItem.Add_Click({
         [System.Diagnostics.Process]::Start($script:CodexUsageDashboardUrl) | Out-Null
     })
@@ -2145,8 +1911,6 @@ function Build-Widget {
     $outer.Child = $root
     $window.Content = $outer
 
-    $compact = New-CompactStatusWindow $window
-
     $controls = [pscustomobject]@{
         Current = $current
         Weekly = $weekly
@@ -2155,10 +1919,9 @@ function Build-Widget {
         Activity = $activity
         Hint = $hint
         Updated = $updated
-        Compact = $compact
     }
 
-    $tray = New-TrayIcon $window $compact
+    $tray = New-TrayIcon $window
 
     $dragHandler = {
         param($sender, $event)
@@ -2180,15 +1943,9 @@ function Build-Widget {
 
     $window.Add_LocationChanged({
         Save-State $window
-        if ($null -ne $compact -and $null -ne $compact.Window -and $compact.Window.IsVisible) {
-            Set-CompactWindowPlacement $compact.Window $window
-        }
     })
     $window.Add_Closed({
         Save-State $window
-        if ($null -ne $compact -and $null -ne $compact.Window) {
-            $compact.Window.Close()
-        }
         if ($null -ne $tray) {
             $tray.Visible = $false
             $tray.Dispose()
