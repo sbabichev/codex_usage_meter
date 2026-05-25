@@ -6,6 +6,7 @@ It reads the real `rate_limits` events that Codex writes locally and shows:
 
 - current 5-hour session usage;
 - weekly usage;
+- optional MiniMax subscription interval and weekly limits from `mmx quota --output json`;
 - last activity impact, combining the latest visible limit movement with local token usage;
 - exact reset time;
 - time remaining until reset;
@@ -22,6 +23,7 @@ The UI is a frameless, fixed-size, Apple-like glass panel with a minimal `Codex 
 - Windows 11
 - Windows PowerShell 5.1 or PowerShell with WPF support
 - Codex installed and used at least once, so local session logs exist
+- Optional: SSH access to a VPS where `mmx-cli` is installed and already authenticated
 
 ## Run
 
@@ -57,6 +59,27 @@ It also compares the latest usable rate-limit snapshot with the previous distinc
 
 The widget refreshes every 3 seconds and ignores non-Codex or incomplete rate-limit events.
 
+## MiniMax Limits
+
+MiniMax quota fetching is configured through `usage-widget.config.json`, ignored `usage-widget.local.json`, or environment variables. Prefer `usage-widget.local.json` for machine-specific SSH aliases and secrets.
+
+Example local config:
+
+```json
+{
+  "minimax": {
+    "enabled": true,
+    "source": "ssh",
+    "sshTarget": "contabo",
+    "sshRemoteCommand": "/home/jarvis/.npm-global/bin/mmx quota --output json --non-interactive",
+    "refreshSeconds": 300,
+    "timeoutSeconds": 10
+  }
+}
+```
+
+The widget treats `current_interval_usage_count` and `current_weekly_usage_count` as used counts and calculates usage as `usage_count / total`.
+
 ## Controls
 
 - Drag anywhere on the glass panel to move it.
@@ -70,8 +93,10 @@ The widget refreshes every 3 seconds and ignores non-Codex or incomplete rate-li
 - `start-usage-widget.cmd` - double-click launcher.
 - `assets/codex-usage-meter.ico` - Lucide-inspired gauge icon for the tray/window.
 - `tools/create-icon.ps1` - regenerates the icon.
+- `usage-widget.config.json` - checked-in settings and MiniMax placeholders.
+- `usage-widget.local.json` - optional local MiniMax settings, ignored by git.
 - `usage-widget.state.json` - local window state, generated automatically and ignored by git.
 
 ## Privacy
 
-The app only reads local Codex session JSONL files. It does not send usage data anywhere.
+By default, the app reads local Codex session JSONL files. If MiniMax is enabled, it also runs the configured HTTPS or SSH quota fetch.

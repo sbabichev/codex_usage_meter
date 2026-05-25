@@ -8,6 +8,9 @@ $ErrorActionPreference = "Stop"
 
 $script:AppDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $script:StatePath = Join-Path $script:AppDir "usage-widget.state.json"
+$script:ConfigPath = Join-Path $script:AppDir "usage-widget.config.json"
+$script:LocalConfigPath = Join-Path $script:AppDir "usage-widget.local.json"
+$script:LogPath = Join-Path $script:AppDir "usage-widget.log"
 $script:CodexSessionsDir = Join-Path $env:USERPROFILE ".codex\sessions"
 $script:IconPath = Join-Path $script:AppDir "assets\codex-usage-meter.ico"
 $script:CodexUsageDashboardUrl = "https://chatgpt.com/codex/settings/usage"
@@ -16,6 +19,12 @@ $script:WidgetHeight = 240
 $script:CompactWidth = 292
 $script:CompactHeight = 42
 $script:StaleAfterSeconds = 900
+$script:MinimaxDefaultRefreshSeconds = 300
+$script:MinimaxRemoteState = @{
+    LastFetch = $null
+    Usage = $null
+    Error = $null
+}
 $script:UsageFloorState = @{
     WindowKey = ""
     PrimaryUsed = $null
@@ -80,6 +89,14 @@ function New-Hairline($topMargin, $bottomMargin) {
     $line.Background = Get-Brush "#CAD4D9"
     $line.Opacity = 0.11
     return $line
+}
+
+function Write-WidgetLog($message) {
+    try {
+        $stamp = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
+        [System.IO.File]::AppendAllText($script:LogPath, "[$stamp] $message`r`n", [System.Text.Encoding]::UTF8)
+    } catch {
+    }
 }
 
 function Get-FileTailLines($path, $maxBytes) {
@@ -161,6 +178,52 @@ function Read-State {
     } catch {
         return $default
     }
+}
+
+function Get-ObjectValue($object, $name, $fallback = $null) {
+    if ($null -eq $object) {
+        return $fallback
+    }
+
+    $property = $object.PSObject.Properties[$name]
+    if ($null -eq $property) {
+        return $fallback
+    }
+
+    return $property.Value
+}
+
+function Read-Config {
+    $config = [pscustomobject]@{}
+
+    if (Test-Path $script:ConfigPath) {
+        try {
+            $raw = [System.IO.File]::ReadAllText($script:ConfigPath, [System.Text.Encoding]::UTF8)
+            $config = $raw | ConvertFrom-Json
+        } catch {
+            $config = [pscustomobject]@{}
+        }
+    }
+
+    if (Test-Path $script:LocalConfigPath) {
+        try {
+            $raw = [System.IO.File]::ReadAllText($script:LocalConfigPath, [System.Text.Encoding]::UTF8)
+            $localConfig = $raw | ConvertFrom-Json
+            foreach ($property in $localConfig.PSObject.Properties) {
+                if ($property.Name -eq "minimax" -and (Get-ObjectValue $config "minimax" $null)) {
+                    $miniMax = Get-ObjectValue $config "minimax" $null
+                    foreach ($miniMaxProperty in $property.Value.PSObject.Properties) {
+                        $miniMax | Add-Member -MemberType NoteProperty -Name $miniMaxProperty.Name -Value $miniMaxProperty.Value -Force
+                    }
+                } else {
+                    $config | Add-Member -MemberType NoteProperty -Name $property.Name -Value $property.Value -Force
+                }
+            }
+        } catch {
+        }
+    }
+
+    return $config
 }
 
 function Save-State($window) {
@@ -377,6 +440,489 @@ function Convert-ToInt64($value) {
         return [int64]$value
     } catch {
         return [int64]0
+    }
+}
+
+function Convert-ToNullableNumber($value) {
+    if ($null -eq $value) {
+        return $null
+    }
+
+    if ($value -is [string] -and [string]::IsNullOrWhiteSpace($value)) {
+        return $null
+    }
+
+    try {
+        return [double]$value
+    } catch {
+        return $null
+    }
+}
+
+function Convert-ToBoolean($value, $default) {
+    if ($null -eq $value) {
+        return [bool]$default
+    }
+
+    if ($value -is [bool]) {
+        return [bool]$value
+    }
+
+    $text = $value.ToString().Trim().ToLowerInvariant()
+    if (@("1", "true", "yes", "on") -contains $text) {
+        return $true
+    }
+
+    if (@("0", "false", "no", "off") -contains $text) {
+        return $false
+    }
+
+    return [bool]$default
+}
+
+function Get-EnvValue($name) {
+    $value = [Environment]::GetEnvironmentVariable($name)
+    if ([string]::IsNullOrWhiteSpace($value)) {
+        return $null
+    }
+
+    return $value
+}
+
+function Get-FirstObjectValue($object, [string[]]$names) {
+    foreach ($name in $names) {
+        $value = Get-ObjectValue $object $name $null
+        if ($null -ne $value) {
+            if ($value -is [string] -and [string]::IsNullOrWhiteSpace($value)) {
+                continue
+            }
+
+            return $value
+        }
+    }
+
+    return $null
+}
+
+function Get-FirstNumberValue($object, [string[]]$names) {
+    foreach ($name in $names) {
+        $value = Convert-ToNullableNumber (Get-ObjectValue $object $name $null)
+        if ($null -ne $value) {
+            return $value
+        }
+    }
+
+    return $null
+}
+
+function Get-FirstStringValue($object, [string[]]$names) {
+    foreach ($name in $names) {
+        $value = Get-ObjectValue $object $name $null
+        if ($null -ne $value -and -not [string]::IsNullOrWhiteSpace($value.ToString())) {
+            return $value.ToString()
+        }
+    }
+
+    return $null
+}
+
+function Get-MinimaxRemoteSettings {
+    $config = Read-Config
+    $minimax = Get-ObjectValue $config "minimax" $null
+
+    $envUrl = Get-EnvValue "MINIMAX_QUOTA_URL"
+    $url = $envUrl
+    if (-not $url) {
+        $url = Get-FirstObjectValue $minimax @("url", "quotaUrl", "endpoint")
+    }
+
+    $envSource = Get-EnvValue "MINIMAX_QUOTA_SOURCE"
+    $source = $envSource
+    if (-not $source) {
+        $source = Get-FirstStringValue $minimax @("source", "mode")
+    }
+
+    $envFilePath = Get-EnvValue "MINIMAX_QUOTA_FILE"
+    $filePath = $envFilePath
+    if (-not $filePath) {
+        $filePath = Get-FirstObjectValue $minimax @("file", "filePath", "jsonPath")
+    }
+
+    $envSshCommand = Get-EnvValue "MINIMAX_QUOTA_SSH_COMMAND"
+    $sshCommand = $envSshCommand
+    if (-not $sshCommand) {
+        $sshCommand = Get-FirstObjectValue $minimax @("sshCommand")
+    }
+
+    $envSshTarget = Get-EnvValue "MINIMAX_QUOTA_SSH_TARGET"
+    $sshTarget = $envSshTarget
+    if (-not $sshTarget) {
+        $sshTarget = Get-FirstObjectValue $minimax @("sshTarget", "sshHost", "ssh")
+    }
+
+    if (-not $source) {
+        if ($filePath) {
+            $source = "file"
+        } elseif ($sshCommand -or $sshTarget) {
+            $source = "ssh"
+        } else {
+            $source = "http"
+        }
+    }
+
+    $enabledValue = Get-EnvValue "MINIMAX_QUOTA_ENABLED"
+    $envHasSource = ($envUrl -or $envFilePath -or $envSshCommand -or $envSshTarget)
+    if (-not $enabledValue -and -not $envHasSource) {
+        $enabledValue = Get-ObjectValue $minimax "enabled" $null
+    }
+
+    $hasSource = ($url -or $filePath -or $sshCommand -or $sshTarget)
+    $enabled = Convert-ToBoolean $enabledValue $hasSource
+
+    $refreshSeconds = Convert-ToNullableNumber (Get-EnvValue "MINIMAX_QUOTA_REFRESH_SECONDS")
+    if ($null -eq $refreshSeconds) {
+        $refreshSeconds = Convert-ToNullableNumber (Get-ObjectValue $minimax "refreshSeconds" $script:MinimaxDefaultRefreshSeconds)
+    }
+    if ($null -eq $refreshSeconds -or $refreshSeconds -le 0) {
+        $refreshSeconds = $script:MinimaxDefaultRefreshSeconds
+    }
+
+    $timeoutSeconds = Convert-ToNullableNumber (Get-EnvValue "MINIMAX_QUOTA_TIMEOUT_SECONDS")
+    if ($null -eq $timeoutSeconds) {
+        $timeoutSeconds = Convert-ToNullableNumber (Get-ObjectValue $minimax "timeoutSeconds" 10)
+    }
+    if ($null -eq $timeoutSeconds -or $timeoutSeconds -le 0) {
+        $timeoutSeconds = 10
+    }
+
+    $authToken = Get-EnvValue "MINIMAX_QUOTA_TOKEN"
+    if (-not $authToken) {
+        $authToken = Get-FirstObjectValue $minimax @("authToken", "token")
+    }
+
+    $authHeaderName = Get-EnvValue "MINIMAX_QUOTA_AUTH_HEADER"
+    if (-not $authHeaderName) {
+        $authHeaderName = Get-FirstObjectValue $minimax @("authHeaderName", "tokenHeader")
+    }
+    if (-not $authHeaderName) {
+        $authHeaderName = "Authorization"
+    }
+
+    $authHeaderScheme = Get-EnvValue "MINIMAX_QUOTA_AUTH_SCHEME"
+    if (-not $authHeaderScheme) {
+        $authHeaderScheme = Get-FirstObjectValue $minimax @("authHeaderScheme")
+    }
+    if ($null -eq $authHeaderScheme) {
+        $authHeaderScheme = "Bearer"
+    }
+
+    $sshPath = Get-EnvValue "MINIMAX_QUOTA_SSH_PATH"
+    if (-not $sshPath) {
+        $sshPath = Get-FirstObjectValue $minimax @("sshPath")
+    }
+    if (-not $sshPath) {
+        $sshPath = "ssh"
+    }
+
+    $sshRemoteCommand = Get-EnvValue "MINIMAX_QUOTA_SSH_REMOTE_COMMAND"
+    if (-not $sshRemoteCommand) {
+        $sshRemoteCommand = Get-FirstObjectValue $minimax @("sshRemoteCommand", "remoteCommand")
+    }
+    if (-not $sshRemoteCommand) {
+        $sshRemoteCommand = "mmx quota --output json --non-interactive"
+    }
+
+    return [pscustomobject]@{
+        Enabled = [bool]$enabled
+        Source = $source.ToString().ToLowerInvariant()
+        Url = if ($url) { $url.ToString() } else { "" }
+        FilePath = if ($filePath) { $filePath.ToString() } else { "" }
+        AuthToken = if ($authToken) { $authToken.ToString() } else { "" }
+        AuthHeaderName = $authHeaderName.ToString()
+        AuthHeaderScheme = if ($authHeaderScheme) { $authHeaderScheme.ToString() } else { "" }
+        RefreshSeconds = [int][Math]::Max(10, [Math]::Round([double]$refreshSeconds))
+        TimeoutSeconds = [int][Math]::Max(2, [Math]::Round([double]$timeoutSeconds))
+        SshCommand = if ($sshCommand) { $sshCommand.ToString() } else { "" }
+        SshPath = $sshPath.ToString()
+        SshTarget = if ($sshTarget) { $sshTarget.ToString() } else { "" }
+        SshRemoteCommand = $sshRemoteCommand.ToString()
+    }
+}
+
+function Quote-ProcessArgument($value) {
+    if ($null -eq $value) {
+        return '""'
+    }
+
+    $text = $value.ToString()
+    if ($text -notmatch '[\s"]') {
+        return $text
+    }
+
+    return '"' + $text.Replace('"', '\"') + '"'
+}
+
+function Invoke-ExternalTextCommand($fileName, $arguments, $timeoutSeconds) {
+    $process = New-Object System.Diagnostics.Process
+    $process.StartInfo = New-Object System.Diagnostics.ProcessStartInfo
+    $process.StartInfo.FileName = $fileName
+    $process.StartInfo.Arguments = $arguments
+    $process.StartInfo.UseShellExecute = $false
+    $process.StartInfo.RedirectStandardOutput = $true
+    $process.StartInfo.RedirectStandardError = $true
+    $process.StartInfo.CreateNoWindow = $true
+
+    $process.Start() | Out-Null
+    $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+    $stderrTask = $process.StandardError.ReadToEndAsync()
+    $completed = $process.WaitForExit([int]($timeoutSeconds * 1000))
+    if (-not $completed) {
+        try {
+            $process.Kill()
+        } catch {
+        }
+        throw "Minimax quota command timed out."
+    }
+
+    $stdout = $stdoutTask.Result
+    $stderr = $stderrTask.Result
+    if ($process.ExitCode -ne 0) {
+        $message = if ($stderr) { $stderr.Trim() } else { "exit code $($process.ExitCode)" }
+        throw "Minimax quota command failed: $message"
+    }
+
+    return $stdout
+}
+
+function Invoke-MinimaxHttpQuota($settings) {
+    if (-not $settings.Url) {
+        throw "Minimax HTTP quota URL is not configured."
+    }
+
+    $headers = @{}
+    if ($settings.AuthToken) {
+        $scheme = $settings.AuthHeaderScheme
+        if ($settings.AuthHeaderName -eq "Authorization" -and $scheme -and $scheme.ToLowerInvariant() -ne "none") {
+            $headers[$settings.AuthHeaderName] = ("{0} {1}" -f $scheme, $settings.AuthToken)
+        } else {
+            $headers[$settings.AuthHeaderName] = $settings.AuthToken
+        }
+    }
+
+    return Invoke-RestMethod -Method Get -Uri $settings.Url -Headers $headers -TimeoutSec $settings.TimeoutSeconds
+}
+
+function Invoke-MinimaxSshQuota($settings) {
+    if ($settings.SshCommand) {
+        $arguments = "-NoProfile -ExecutionPolicy Bypass -Command " + (Quote-ProcessArgument $settings.SshCommand)
+        $stdout = Invoke-ExternalTextCommand "powershell.exe" $arguments $settings.TimeoutSeconds
+        return $stdout | ConvertFrom-Json
+    }
+
+    if (-not $settings.SshTarget) {
+        throw "Minimax SSH target is not configured."
+    }
+
+    $arguments = (Quote-ProcessArgument $settings.SshTarget) + " " + (Quote-ProcessArgument $settings.SshRemoteCommand)
+    $stdout = Invoke-ExternalTextCommand $settings.SshPath $arguments $settings.TimeoutSeconds
+    return $stdout | ConvertFrom-Json
+}
+
+function Invoke-MinimaxQuotaRaw($settings) {
+    switch ($settings.Source) {
+        "ssh" {
+            return Invoke-MinimaxSshQuota $settings
+        }
+        "file" {
+            if (-not $settings.FilePath -or -not (Test-Path $settings.FilePath)) {
+                throw "Minimax quota file is not configured or does not exist."
+            }
+
+            return ([System.IO.File]::ReadAllText($settings.FilePath, [System.Text.Encoding]::UTF8) | ConvertFrom-Json)
+        }
+        default {
+            return Invoke-MinimaxHttpQuota $settings
+        }
+    }
+}
+
+function Convert-MinimaxTimestamp($value) {
+    if ($null -eq $value) {
+        return [int64]0
+    }
+
+    if ($value -is [DateTime]) {
+        return ([DateTimeOffset]$value).ToUnixTimeSeconds()
+    }
+
+    $number = Convert-ToNullableNumber $value
+    if ($null -ne $number) {
+        if ($number -le 0) {
+            return [int64]0
+        }
+
+        if ($number -gt 9999999999) {
+            return [int64][Math]::Floor($number / 1000)
+        }
+
+        return [int64][Math]::Floor($number)
+    }
+
+    try {
+        return ([DateTimeOffset]::Parse($value.ToString())).ToUnixTimeSeconds()
+    } catch {
+        return [int64]0
+    }
+}
+
+function Get-MinimaxPayloadRoot($raw) {
+    $current = $raw
+    for ($index = 0; $index -lt 3; $index++) {
+        $child = Get-FirstObjectValue $current @("data", "quota", "quotas", "usage", "result")
+        if ($null -eq $child -or $child -is [string]) {
+            break
+        }
+
+        $current = $child
+    }
+
+    return $current
+}
+
+function Get-MinimaxModelQuotaObject($root) {
+    $items = Get-FirstObjectValue $root @("model_remains", "modelRemains", "models")
+    if (-not $items) {
+        return $null
+    }
+
+    $usable = @($items) | Where-Object {
+        (Get-FirstNumberValue $_ @("current_interval_total_count", "current_weekly_total_count", "total_count", "total")) -ne $null
+    } | Sort-Object {
+        $total = Get-FirstNumberValue $_ @("current_interval_total_count", "current_weekly_total_count", "total_count", "total")
+        if ($null -eq $total) { 0 } else { $total }
+    } -Descending | Select-Object -First 1
+
+    return $usable
+}
+
+function Convert-MinimaxQuotaWindow($source, $prefix, $defaultWindowMinutes, $allowGenericTime) {
+    if (-not $source) {
+        return $null
+    }
+
+    $total = Get-FirstNumberValue $source @("${prefix}_total_count", "total_count", "total", "limit", "entitlement", "quota")
+    $used = Get-FirstNumberValue $source @(
+        "${prefix}_usage_count",
+        "${prefix}_used_count",
+        "usage_count",
+        "used_count",
+        "used"
+    )
+    $remaining = Get-FirstNumberValue $source @(
+        "${prefix}_remaining_count",
+        "${prefix}_remains_count",
+        "${prefix}_left_count",
+        "remaining_count",
+        "remaining",
+        "remains",
+        "left"
+    )
+
+    if ($null -eq $used -and $null -ne $total -and $null -ne $remaining) {
+        $used = [Math]::Max(0, $total - $remaining)
+    }
+
+    if ($null -eq $remaining -and $null -ne $total -and $null -ne $used) {
+        $remaining = [Math]::Max(0, $total - $used)
+    }
+
+    $percent = $null
+    if ($null -ne $used -and $null -ne $total -and $total -gt 0) {
+        $percent = ($used / $total) * 100
+    } else {
+        $percent = Get-FirstNumberValue $source @("${prefix}_used_percent", "used_percent", "usage_percent", "usagePercentage")
+    }
+
+    if ($null -eq $percent) {
+        return $null
+    }
+
+    $endNames = @("${prefix}_end_time", "${prefix}_reset_at", "${prefix}_resets_at", "${prefix}_reset_time")
+    $startNames = @("${prefix}_start_time", "${prefix}_starts_at", "${prefix}_started_at")
+    $durationNames = @("${prefix}_remains_time", "${prefix}_remaining_time", "${prefix}_ttl_seconds")
+    if ($prefix -eq "current_weekly") {
+        $endNames += @("weekly_end_time", "week_end_time")
+        $startNames += @("weekly_start_time", "week_start_time")
+        $durationNames += @("weekly_remains_time", "weekly_remaining_time", "week_remains_time")
+    }
+    if ($allowGenericTime) {
+        $endNames += @("end_time", "reset_at", "resets_at", "reset_time", "endAt")
+        $startNames += @("start_time", "starts_at", "started_at", "startAt")
+        $durationNames += @("remains_time", "remaining_time", "time_remaining", "ttl_seconds")
+    }
+
+    $resetSeconds = Convert-MinimaxTimestamp (Get-FirstObjectValue $source $endNames)
+    if ($resetSeconds -le 0) {
+        $durationSeconds = Get-FirstNumberValue $source $durationNames
+        if ($null -ne $durationSeconds -and $durationSeconds -gt 0) {
+            $resetSeconds = [DateTimeOffset]::Now.AddSeconds($durationSeconds).ToUnixTimeSeconds()
+        }
+    }
+    if ($resetSeconds -le 0) {
+        $startSeconds = Convert-MinimaxTimestamp (Get-FirstObjectValue $source $startNames)
+        if ($startSeconds -gt 0 -and $defaultWindowMinutes -gt 0) {
+            $resetSeconds = [int64]($startSeconds + ([double]$defaultWindowMinutes * 60))
+        }
+    }
+
+    return [pscustomobject]@{
+        used_percent = [Math]::Max(0, [Math]::Min(100, [double]$percent))
+        resets_at = $resetSeconds
+        window_minutes = $defaultWindowMinutes
+        total = if ($null -ne $total) { [double]$total } else { $null }
+        remaining = if ($null -ne $remaining) { [double]$remaining } else { $null }
+        used = if ($null -ne $used) { [double]$used } else { $null }
+    }
+}
+
+function Convert-MinimaxQuota($raw, $sourceName) {
+    $root = Get-MinimaxPayloadRoot $raw
+    $model = Get-MinimaxModelQuotaObject $root
+    $primarySource = if ($model) { $model } else { $root }
+
+    $intervalSource = Get-FirstObjectValue $root @("interval", "current_interval", "session", "five_hour", "rolling_interval")
+    if (-not $intervalSource) {
+        $intervalSource = $primarySource
+    }
+
+    $weeklySource = Get-FirstObjectValue $root @("weekly", "current_weekly", "week")
+    if (-not $weeklySource) {
+        $weeklySource = $primarySource
+    }
+
+    $sameSource = [Object]::ReferenceEquals($intervalSource, $weeklySource)
+    $interval = Convert-MinimaxQuotaWindow $intervalSource "current_interval" 300 $true
+    $weekly = Convert-MinimaxQuotaWindow $weeklySource "current_weekly" 10080 (-not $sameSource)
+
+    if (-not $interval -or -not $weekly) {
+        throw "Minimax quota JSON does not contain usable interval and weekly counts."
+    }
+
+    $plan = Get-FirstStringValue $primarySource @("current_subscribe_title", "subscribe_title", "plan_name", "plan", "title", "name", "model_name")
+    if (-not $plan) {
+        $plan = Get-FirstStringValue $root @("current_subscribe_title", "subscribe_title", "plan_name", "plan", "title", "name")
+    }
+
+    return [pscustomobject]@{
+        ok = $true
+        message = $null
+        plan = if ($plan) { $plan } else { "Minimax" }
+        source = $sourceName
+        updated = Get-Date
+        isStale = $false
+        error = $null
+        primary = $interval
+        secondary = $weekly
     }
 }
 
@@ -891,11 +1437,12 @@ function Apply-MinimaxFloor($limits) {
 }
 
 function Get-MinimaxUsage {
-    $history = Get-RateLimitHistory "minimax"
-    if (-not $history) {
+    $settings = Get-MinimaxRemoteSettings
+    if (-not $settings.Enabled) {
         return [pscustomobject]@{
             ok = $false
-            message = "Waiting for Minimax limits"
+            configured = $false
+            message = "Minimax not configured"
             plan = "unknown"
             updated = Get-Date
             primary = $null
@@ -903,26 +1450,42 @@ function Get-MinimaxUsage {
         }
     }
 
-    $latest = $history.Latest
-    $previous = $history.PreviousDistinct
-    $limits = $latest.Event.payload.rate_limits
-    Apply-MinimaxFloor $limits
-    $age = (Get-Date) - $latest.Stamp.LocalDateTime
-    $primaryDelta = if ($previous) { $latest.PrimaryUsed - $previous.PrimaryUsed } else { $null }
-    $secondaryDelta = if ($previous) { $latest.SecondaryUsed - $previous.SecondaryUsed } else { $null }
-    return [pscustomobject]@{
-        ok = $true
-        message = $null
-        plan = $limits.plan_type
-        updated = $latest.Stamp.LocalDateTime
-        isStale = ($age.TotalSeconds -gt $script:StaleAfterSeconds)
-        staleText = if ($age.TotalSeconds -gt $script:StaleAfterSeconds) { "Updated {0}m ago" -f [Math]::Max(1, [Math]::Floor($age.TotalMinutes)) } else { "" }
-        primaryDelta = $primaryDelta
-        secondaryDelta = $secondaryDelta
-        primaryDeltaText = Format-PercentDelta $primaryDelta
-        secondaryDeltaText = Format-PercentDelta $secondaryDelta
-        primary = $limits.primary
-        secondary = $limits.secondary
+    $now = Get-Date
+    if ($script:MinimaxRemoteState.Usage -and $script:MinimaxRemoteState.LastFetch) {
+        $age = $now - $script:MinimaxRemoteState.LastFetch
+        if ($age.TotalSeconds -lt $settings.RefreshSeconds) {
+            return $script:MinimaxRemoteState.Usage
+        }
+    }
+
+    try {
+        $raw = Invoke-MinimaxQuotaRaw $settings
+        $usage = Convert-MinimaxQuota $raw $settings.Source
+        $script:MinimaxRemoteState.LastFetch = $now
+        $script:MinimaxRemoteState.Usage = $usage
+        $script:MinimaxRemoteState.Error = $null
+        Write-WidgetLog ("Minimax quota refreshed via {0}: interval {1:N1}%, weekly {2:N1}%." -f $settings.Source, [double]$usage.primary.used_percent, [double]$usage.secondary.used_percent)
+        return $usage
+    } catch {
+        $script:MinimaxRemoteState.LastFetch = $now
+        $script:MinimaxRemoteState.Error = $_.Exception.Message
+        Write-WidgetLog ("Minimax quota refresh failed via {0}: {1}" -f $settings.Source, $_.Exception.Message)
+        if ($script:MinimaxRemoteState.Usage) {
+            $script:MinimaxRemoteState.Usage.isStale = $true
+            $script:MinimaxRemoteState.Usage.error = $_.Exception.Message
+            return $script:MinimaxRemoteState.Usage
+        }
+
+        return [pscustomobject]@{
+            ok = $false
+            configured = $true
+            message = "Minimax unavailable"
+            plan = "unknown"
+            updated = $now
+            error = $_.Exception.Message
+            primary = $null
+            secondary = $null
+        }
     }
 }
 

@@ -30,6 +30,14 @@
                                              ]
                                }
                },
+    "minimax":  {
+                    "enabled":  false,
+                    "source":  "ssh",
+                    "sshTarget":  "",
+                    "sshRemoteCommand":  "mmx quota --output json --non-interactive",
+                    "refreshSeconds":  300,
+                    "timeoutSeconds":  10
+                },
     "window":  {
                    "left":  0,
                    "top":  1652,

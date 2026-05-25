@@ -11,25 +11,28 @@ This repository contains a Windows PowerShell + WPF tray-style widget for monito
 - Icon generator: `tools/create-icon.ps1`
 - User-facing docs: `README.md`
 - Local state: `usage-widget.state.json` is ignored by git and should remain local.
+- Local MiniMax config: `usage-widget.local.json` is ignored by git and should remain local.
 
 ## Data Sources
 
 - Reads Codex telemetry from `%USERPROFILE%\.codex\sessions\**\*.jsonl`.
-- Uses only valid `rate_limits` events where `limit_id=codex` or `limit_id=minimax`.
+- Uses only valid Codex `rate_limits` events where `limit_id=codex`.
+- Reads MiniMax subscription quotas from configured `mmx quota --output json --non-interactive` output via SSH/HTTP/file.
 - Codex: `primary` = current 5-hour session, `secondary` = weekly limit.
-- Minimax: `primary` = daily limit, `secondary` = weekly limit.
+- MiniMax: `primary` = current interval, `secondary` = weekly limit.
+- Treats MiniMax `current_interval_usage_count` and `current_weekly_usage_count` as used counts.
 - Compares the latest usable rate-limit snapshot with the previous distinct snapshot to show last activity impact.
 - Reads local `token_count` and `task_started` events to estimate recent turn, latest call, and last-3-minute token usage.
 
 ## UI Layout
 
-- Widget height: 420px (increased from 276px to fit MINIMAX section)
-- Header shows "Codex PLUS | MINIMAX PRO" with brand-specific colors:
+- Widget uses a compact side-by-side Codex and MiniMax layout.
+- Sections use brand-specific colors:
   - Codex: cyan (#6FE8FF)
   - MINIMAX: red-orange (#FF8A3D)
 - MINIMAX section in bordered container with orange border
 - Two blocks: `CURRENT SESSION` and `WEEKLY LIMIT` for Codex
-- One block: `MINIMAX DAILY` for Minimax
+- Two blocks: `CURRENT SESSION` and `WEEKLY` for MiniMax
 - The main usage bar changes color by `used_percent`:
   - `0-49`: lime
   - `50-74`: yellow-green
