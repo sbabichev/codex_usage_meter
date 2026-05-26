@@ -23,6 +23,8 @@ $script:MinimaxRemoteState = @{
     Usage = $null
     Error = $null
 }
+$script:MinimaxEnabled = $true
+$script:CodexEnabled = $true
 $script:UsageFloorState = @{
     WindowKey = ""
     PrimaryUsed = $null
@@ -159,6 +161,10 @@ function Read-State {
         opacity = 1.0
         refreshSeconds = 3
         usageFloor = $null
+        providers = [ordered]@{
+            codex = $true
+            minimax = $true
+        }
     }
 
     if (-not (Test-Path $script:StatePath)) {
@@ -224,6 +230,99 @@ function Read-Config {
     return $config
 }
 
+function Build-ProviderContextMenu($window, $codexSection, $minimaxSection) {
+    $menu = New-Object System.Windows.Controls.ContextMenu
+
+    $codexItem = New-Object System.Windows.Controls.MenuItem
+    $codexItem.Header = "Show Codex"
+    $codexItem.IsCheckable = $true
+    $codexItem.IsChecked = $script:CodexEnabled
+    $codexItem.Add_Click({
+        $script:CodexEnabled = -not $script:CodexEnabled
+        Sync-ProviderVisibility $codexSection $minimaxSection
+        Sync-ProviderState
+        Sync-WindowSize $window
+    })
+
+    $minimaxItem = New-Object System.Windows.Controls.MenuItem
+    $minimaxItem.Header = "Show MiniMax"
+    $minimaxItem.IsCheckable = $true
+    $minimaxItem.IsChecked = $script:MinimaxEnabled
+    $minimaxItem.Add_Click({
+        $script:MinimaxEnabled = -not $script:MinimaxEnabled
+        Sync-ProviderVisibility $codexSection $minimaxSection
+        Sync-ProviderState
+        Sync-WindowSize $window
+    })
+
+    $separator = New-Object System.Windows.Controls.Separator
+
+    $topmostItem = New-Object System.Windows.Controls.MenuItem
+    $topmostItem.Header = "Always on Top"
+    $topmostItem.IsCheckable = $true
+    $topmostItem.IsChecked = $window.Topmost
+    $topmostItem.Add_Click({
+        $window.Topmost = -not $window.Topmost
+        Sync-ProviderState
+    })
+
+    $exitItem = New-Object System.Windows.Controls.MenuItem
+    $exitItem.Header = "Exit"
+    $exitItem.Add_Click({
+        $window.Close()
+    })
+
+    $menu.Items.Add($codexItem) | Out-Null
+    $menu.Items.Add($minimaxItem) | Out-Null
+    $menu.Items.Add($separator) | Out-Null
+    $menu.Items.Add($topmostItem) | Out-Null
+    $menu.Items.Add($exitItem) | Out-Null
+
+    return $menu
+}
+
+function Sync-ProviderVisibility($codexSection, $minimaxSection) {
+    if ($script:CodexEnabled) {
+        $codexSection.Visibility = "Visible"
+    } else {
+        $codexSection.Visibility = "Collapsed"
+    }
+
+    if ($script:MinimaxEnabled) {
+        $minimaxSection.Visibility = "Visible"
+    } else {
+        $minimaxSection.Visibility = "Collapsed"
+    }
+}
+
+function Sync-ProviderState {
+    $state = Read-State
+    $state.providers.codex = $script:CodexEnabled
+    $state.providers.minimax = $script:MinimaxEnabled
+
+    $json = $state | ConvertTo-Json -Depth 4
+    try {
+        [System.IO.File]::WriteAllText($script:StatePath, $json, [System.Text.Encoding]::UTF8)
+    } catch {
+    }
+}
+
+function Sync-WindowSize($window) {
+    $visibleCount = 0
+    if ($script:CodexEnabled) { $visibleCount++ }
+    if ($script:MinimaxEnabled) { $visibleCount++ }
+
+    if ($visibleCount -eq 0) {
+        return
+    }
+
+    if ($visibleCount -eq 1) {
+        $window.Width = $script:WidgetWidth * 0.6
+    } else {
+        $window.Width = $script:WidgetWidth
+    }
+}
+
 function Save-State($window) {
     try {
         $state = [ordered]@{
@@ -236,6 +335,10 @@ function Save-State($window) {
                 windowKey = if ($script:UsageFloorState.WindowKey) { [string]$script:UsageFloorState.WindowKey } else { "" }
                 primaryUsed = if ($null -ne $script:UsageFloorState.PrimaryUsed) { [double]$script:UsageFloorState.PrimaryUsed } else { $null }
                 secondaryUsed = if ($null -ne $script:UsageFloorState.SecondaryUsed) { [double]$script:UsageFloorState.SecondaryUsed } else { $null }
+            }
+            providers = [ordered]@{
+                codex = $script:CodexEnabled
+                minimax = $script:MinimaxEnabled
             }
         }
         $json = $state | ConvertTo-Json -Depth 4
@@ -1787,6 +1890,12 @@ function Build-Widget {
     $state = Read-State
     Initialize-UsageFloorState $state
 
+    # Load provider visibility state
+    if ($state.providers) {
+        $script:CodexEnabled = [bool]$state.providers.codex
+        $script:MinimaxEnabled = [bool]$state.providers.minimax
+    }
+
     $window = New-Object System.Windows.Window
     $window.Title = "Codex Usage Meter"
     if (Test-Path $script:IconPath) {
@@ -1891,6 +2000,24 @@ function Build-Widget {
     [System.Windows.Controls.Grid]::SetColumn($minimaxSection, 2)
     $sectionsGrid.Children.Add($minimaxSection) | Out-Null
 
+    # Set initial visibility based on provider state
+    if (-not $script:CodexEnabled) {
+        $codexSection.Visibility = "Collapsed"
+    }
+    if (-not $script:MinimaxEnabled) {
+        $minimaxSection.Visibility = "Collapsed"
+    }
+
+    # Adjust window width based on enabled providers
+    $enabledCount = 0
+    if ($script:CodexEnabled) { $enabledCount++ }
+    if ($script:MinimaxEnabled) { $enabledCount++ }
+    if ($enabledCount -eq 1) {
+        $window.Width = $script:WidgetWidth * 0.6
+        $window.MinWidth = $script:WidgetWidth * 0.6
+        $window.MaxWidth = $script:WidgetWidth * 0.6
+    }
+
     $content.Children.Add($sectionsGrid) | Out-Null
 
     $activity = New-TextBlock "Last activity: waiting for token details" 9 "Regular" "#E2E9EC"
@@ -1919,9 +2046,17 @@ function Build-Widget {
         Activity = $activity
         Hint = $hint
         Updated = $updated
+        CodexSection = $codexSection
+        MinimaxSection = $minimaxSection
     }
 
     $tray = New-TrayIcon $window
+
+    # Right-click context menu for provider toggle
+    $contextMenu = Build-ProviderContextMenu $window $codexSection $minimaxSection
+    $outer.ContextMenu = $contextMenu
+    $outer.ContextMenu.PlacementTarget = $outer
+    $outer.ContextMenu.Placement = [System.Windows.Controls.Primitives.PlacementMode]::MousePoint
 
     $dragHandler = {
         param($sender, $event)
@@ -1940,6 +2075,15 @@ function Build-Widget {
         }
     }
     $outer.Add_MouseLeftButtonDown($dragHandler)
+
+    # Right-click to show context menu
+    $rightClickHandler = {
+        param($sender, $event)
+        $contextMenu.PlacementTarget = $sender
+        $contextMenu.Placement = [System.Windows.Controls.Primitives.PlacementMode]::MousePoint
+        $contextMenu.IsOpen = $true
+    }
+    $outer.Add_MouseRightButtonDown($rightClickHandler)
 
     $window.Add_LocationChanged({
         Save-State $window
