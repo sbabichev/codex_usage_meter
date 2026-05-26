@@ -15,7 +15,7 @@ $script:CodexSessionsDir = Join-Path $env:USERPROFILE ".codex\sessions"
 $script:IconPath = Join-Path $script:AppDir "assets\codex-usage-meter.ico"
 $script:CodexUsageDashboardUrl = "https://chatgpt.com/codex/settings/usage"
 $script:WidgetWidth = 360
-$script:WidgetHeight = 240
+$script:WidgetHeight = 450
 $script:StaleAfterSeconds = 900
 $script:MinimaxDefaultRefreshSeconds = 300
 $script:MinimaxRemoteState = @{
@@ -23,6 +23,8 @@ $script:MinimaxRemoteState = @{
     Usage = $null
     Error = $null
 }
+$script:CodexEnabled = $true
+$script:MinimaxEnabled = $true
 $script:UsageFloorState = @{
     WindowKey = ""
     PrimaryUsed = $null
@@ -159,6 +161,10 @@ function Read-State {
         opacity = 1.0
         refreshSeconds = 3
         usageFloor = $null
+        providers = [ordered]@{
+            codex = $true
+            minimax = $true
+        }
     }
 
     if (-not (Test-Path $script:StatePath)) {
@@ -224,6 +230,81 @@ function Read-Config {
     return $config
 }
 
+function Build-ProviderContextMenu($window, $codexSection, $minimaxSection) {
+    $menu = New-Object System.Windows.Controls.ContextMenu
+
+    $codexItem = New-Object System.Windows.Controls.MenuItem
+    $codexItem.Header = "Show Codex"
+    $codexItem.IsCheckable = $true
+    $codexItem.IsChecked = $script:CodexEnabled
+    $codexItem.Add_Click({
+        $script:CodexEnabled = -not $script:CodexEnabled
+        Sync-ProviderVisibility $codexSection $minimaxSection
+        Sync-ProviderState
+    })
+
+    $minimaxItem = New-Object System.Windows.Controls.MenuItem
+    $minimaxItem.Header = "Show MiniMax"
+    $minimaxItem.IsCheckable = $true
+    $minimaxItem.IsChecked = $script:MinimaxEnabled
+    $minimaxItem.Add_Click({
+        $script:MinimaxEnabled = -not $script:MinimaxEnabled
+        Sync-ProviderVisibility $codexSection $minimaxSection
+        Sync-ProviderState
+    })
+
+    $separator = New-Object System.Windows.Controls.Separator
+
+    $topmostItem = New-Object System.Windows.Controls.MenuItem
+    $topmostItem.Header = "Always on Top"
+    $topmostItem.IsCheckable = $true
+    $topmostItem.IsChecked = $window.Topmost
+    $topmostItem.Add_Click({
+        $window.Topmost = -not $window.Topmost
+        Sync-ProviderState
+    })
+
+    $exitItem = New-Object System.Windows.Controls.MenuItem
+    $exitItem.Header = "Exit"
+    $exitItem.Add_Click({
+        $window.Close()
+    })
+
+    $menu.Items.Add($codexItem) | Out-Null
+    $menu.Items.Add($minimaxItem) | Out-Null
+    $menu.Items.Add($separator) | Out-Null
+    $menu.Items.Add($topmostItem) | Out-Null
+    $menu.Items.Add($exitItem) | Out-Null
+
+    return $menu
+}
+
+function Sync-ProviderVisibility($codexSection, $minimaxSection) {
+    if ($script:CodexEnabled) {
+        $codexSection.Visibility = "Visible"
+    } else {
+        $codexSection.Visibility = "Collapsed"
+    }
+
+    if ($script:MinimaxEnabled) {
+        $minimaxSection.Visibility = "Visible"
+    } else {
+        $minimaxSection.Visibility = "Collapsed"
+    }
+}
+
+function Sync-ProviderState {
+    $state = Read-State
+    $state.providers.codex = $script:CodexEnabled
+    $state.providers.minimax = $script:MinimaxEnabled
+
+    $json = $state | ConvertTo-Json -Depth 4
+    try {
+        [System.IO.File]::WriteAllText($script:StatePath, $json, [System.Text.Encoding]::UTF8)
+    } catch {
+    }
+}
+
 function Save-State($window) {
     try {
         $state = [ordered]@{
@@ -236,6 +317,10 @@ function Save-State($window) {
                 windowKey = if ($script:UsageFloorState.WindowKey) { [string]$script:UsageFloorState.WindowKey } else { "" }
                 primaryUsed = if ($null -ne $script:UsageFloorState.PrimaryUsed) { [double]$script:UsageFloorState.PrimaryUsed } else { $null }
                 secondaryUsed = if ($null -ne $script:UsageFloorState.SecondaryUsed) { [double]$script:UsageFloorState.SecondaryUsed } else { $null }
+            }
+            providers = [ordered]@{
+                codex = $script:CodexEnabled
+                minimax = $script:MinimaxEnabled
             }
         }
         $json = $state | ConvertTo-Json -Depth 4
@@ -1712,10 +1797,10 @@ function Update-Widget($controls) {
         Update-LimitRow $controls.MinimaxCurrent $null "Waiting for Minimax" ""
         Update-LimitRow $controls.MinimaxWeekly $null "" ""
         $hint = Get-UsageHint $null $null $false
-        $controls.Hint.Text = $hint.Text
-        $controls.Hint.Foreground = Get-Brush $hint.Color
-        $controls.Activity.Text = Format-ActivityText $null $activity
-        $controls.Activity.ToolTip = Format-ActivityTooltip $null $activity
+        $controls.CodexHint.Text = $hint.Text
+        $controls.CodexHint.Foreground = Get-Brush $hint.Color
+        $controls.CodexActivity.Text = Format-ActivityText $null $activity
+        $controls.CodexActivity.ToolTip = Format-ActivityTooltip $null $activity
         $controls.Updated.Text = "Updated " + (Get-Date).ToString("HH:mm:ss")
         return
     }
@@ -1741,10 +1826,10 @@ function Update-Widget($controls) {
     }
 
     $hint = Get-UsageHint $usage.primary $usage.secondary $usage.isStale
-    $controls.Hint.Text = $hint.Text
-    $controls.Hint.Foreground = Get-Brush $hint.Color
-    $controls.Activity.Text = Format-ActivityText $usage $activity
-    $controls.Activity.ToolTip = Format-ActivityTooltip $usage $activity
+    $controls.CodexHint.Text = $hint.Text
+    $controls.CodexHint.Foreground = Get-Brush $hint.Color
+    $controls.CodexActivity.Text = Format-ActivityText $usage $activity
+    $controls.CodexActivity.ToolTip = Format-ActivityTooltip $usage $activity
     $controls.Updated.Text = "Updated " + $usage.updated.ToString("HH:mm:ss")
 }
 
@@ -1787,6 +1872,12 @@ function Build-Widget {
     $state = Read-State
     Initialize-UsageFloorState $state
 
+    # Load provider visibility state
+    if ($state.providers) {
+        $script:CodexEnabled = [bool]$state.providers.codex
+        $script:MinimaxEnabled = [bool]$state.providers.minimax
+    }
+
     $window = New-Object System.Windows.Window
     $window.Title = "Codex Usage Meter"
     if (Test-Path $script:IconPath) {
@@ -1797,8 +1888,9 @@ function Build-Widget {
     $window.Height = $script:WidgetHeight
     $window.MinWidth = $script:WidgetWidth
     $window.MaxWidth = $script:WidgetWidth
-    $window.MinHeight = $script:WidgetHeight
-    $window.MaxHeight = $script:WidgetHeight
+    $window.MinHeight = 200
+    $window.MaxHeight = 600
+    $window.SizeToContent = "Height"
     $window.WindowStyle = "None"
     $window.AllowsTransparency = $true
     $window.Background = [System.Windows.Media.Brushes]::Transparent
@@ -1826,17 +1918,17 @@ function Build-Widget {
     }
 
     $root = New-Object System.Windows.Controls.Grid
+    $root.RowDefinitions.Add((New-Object System.Windows.Controls.RowDefinition))
     $root.RowDefinitions.Add((New-Object System.Windows.Controls.RowDefinition -Property @{ Height = "Auto" }))
 
     $content = New-Object System.Windows.Controls.StackPanel
     $content.Margin = "0,0,0,0"
     [System.Windows.Controls.Grid]::SetRow($content, 0)
 
-    # Two column layout for Codex and Minimax side by side
+    # Vertical layout: Codex on top, Minimax below
     $sectionsGrid = New-Object System.Windows.Controls.Grid
-    $sectionsGrid.ColumnDefinitions.Add((New-Object System.Windows.Controls.ColumnDefinition))
-    $sectionsGrid.ColumnDefinitions.Add((New-Object System.Windows.Controls.ColumnDefinition -Property @{ Width = "6" }))
-    $sectionsGrid.ColumnDefinitions.Add((New-Object System.Windows.Controls.ColumnDefinition))
+    $sectionsGrid.RowDefinitions.Add((New-Object System.Windows.Controls.RowDefinition))
+    $sectionsGrid.RowDefinitions.Add((New-Object System.Windows.Controls.RowDefinition -Property @{ Height = "Auto" }))
     $sectionsGrid.Margin = "0,0,0,4"
 
     # Codex section with cyan border
@@ -1850,24 +1942,35 @@ function Build-Widget {
     $codexSection.Background = [System.Windows.Media.Brushes]::Transparent
 
     $codexInner = New-Object System.Windows.Controls.StackPanel
-    $codexInner.Margin = "10,6,10,6"
+    $codexInner.Margin = "10,8,10,8"
 
     $codexLabel = New-TextBlock "CODEX" 9.5 "SemiBold" "#6FE8FF"
     $codexLabel.Opacity = 0.85
 
     $current = New-LimitRow "CURRENT SESSION" $false 5
     $weekly = New-LimitRow "WEEKLY" $false 7
+
+    $codexActivity = New-TextBlock "Last activity: waiting for token details" 9 "Regular" "#E2E9EC"
+    $codexActivity.Margin = "0,6,0,0"
+    $codexActivity.Opacity = 0.74
+
+    $codexHint = New-TextBlock "Usage pace looks balanced." 9.5 "Regular" "#D6E2E8"
+    $codexHint.Margin = "0,2,0,0"
+    $codexHint.Opacity = 0.78
+
     $codexInner.Children.Add($codexLabel) | Out-Null
     $codexInner.Children.Add($current.panel) | Out-Null
     $codexInner.Children.Add($weekly.panel) | Out-Null
+    $codexInner.Children.Add($codexActivity) | Out-Null
+    $codexInner.Children.Add($codexHint) | Out-Null
 
     $codexSection.Child = $codexInner
-    [System.Windows.Controls.Grid]::SetColumn($codexSection, 0)
+    [System.Windows.Controls.Grid]::SetRow($codexSection, 0)
     $sectionsGrid.Children.Add($codexSection) | Out-Null
 
     # Minimax section with orange border
     $minimaxSection = New-Object System.Windows.Controls.Border
-    $minimaxSection.Margin = "0,0,0,0"
+    $minimaxSection.Margin = "0,8,0,0"
     $minimaxSection.Padding = "0"
     $minimaxSection.BorderThickness = 1
     $minimaxSection.CornerRadius = 10
@@ -1888,21 +1991,10 @@ function Build-Widget {
     $minimaxInner.Children.Add($minimaxWeekly.panel) | Out-Null
 
     $minimaxSection.Child = $minimaxInner
-    [System.Windows.Controls.Grid]::SetColumn($minimaxSection, 2)
+    [System.Windows.Controls.Grid]::SetRow($minimaxSection, 1)
     $sectionsGrid.Children.Add($minimaxSection) | Out-Null
 
     $content.Children.Add($sectionsGrid) | Out-Null
-
-    $activity = New-TextBlock "Last activity: waiting for token details" 9 "Regular" "#E2E9EC"
-    $activity.Margin = "0,4,0,0"
-    $activity.Opacity = 0.74
-
-    $hint = New-TextBlock "Usage pace looks balanced." 9.5 "Regular" "#D6E2E8"
-    $hint.Margin = "0,2,0,0"
-    $hint.Opacity = 0.78
-
-    $content.Children.Add($activity) | Out-Null
-    $content.Children.Add($hint) | Out-Null
     $root.Children.Add($content) | Out-Null
 
     $updated = New-TextBlock "" 1 "Normal" "#AAB4BB"
@@ -1910,18 +2002,39 @@ function Build-Widget {
 
     $outer.Child = $root
     $window.Content = $outer
+    $window.Visibility = "Visible"
+
+    $root.Add_Loaded({
+        $window.Dispatcher.Invoke([System.Windows.Threading.DispatcherPriority]::Render, [action] {})
+        $window.Dispatcher.Invoke([System.Windows.Threading.DispatcherPriority]::Layout, [action] {})
+        $height = [Math]::Max($outer.ActualHeight, $sectionsGrid.ActualHeight, $codexSection.ActualHeight, $minimaxSection.ActualHeight)
+        if ($height -gt 100) {
+            $window.Height = $height + 40
+            $window.MinHeight = $window.Height
+            $window.MaxHeight = $window.Height
+        }
+        Sync-ProviderVisibility $codexSection $minimaxSection
+        Update-Widget $controls
+    })
 
     $controls = [pscustomobject]@{
         Current = $current
         Weekly = $weekly
         MinimaxCurrent = $minimaxCurrent
         MinimaxWeekly = $minimaxWeekly
-        Activity = $activity
-        Hint = $hint
+        CodexActivity = $codexActivity
+        CodexHint = $codexHint
         Updated = $updated
     }
 
     $tray = New-TrayIcon $window
+
+    $outer.Add_MouseRightButtonUp({
+        param($sender, $event)
+        $menu = Build-ProviderContextMenu $window $codexSection $minimaxSection
+        $menu.Placement = "Mouse"
+        $menu.IsOpen = $true
+    })
 
     $dragHandler = {
         param($sender, $event)
@@ -1965,7 +2078,6 @@ function Build-Widget {
     $timer.Add_Tick({ Update-Widget $controls })
     $timer.Start()
 
-    $window.Add_ContentRendered({ Update-Widget $controls })
     $window.ShowDialog()
 }
 
