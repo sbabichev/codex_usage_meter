@@ -2032,8 +2032,24 @@ function Build-Widget {
     $outer.Add_MouseRightButtonUp({
         param($sender, $event)
         $menu = Build-ProviderContextMenu $window $codexSection $minimaxSection
-        $menu.Placement = "Mouse"
-        $menu.IsOpen = $true
+
+        # Get mouse position in screen coordinates
+        $mousePos = [System.Windows.Input.Mouse]::GetPosition($window)
+        $screenPoint = $window.PointToScreen($mousePos)
+
+        $popup = New-Object System.Windows.Controls.Primitives.Popup
+        $popup.PlacementTarget = $window
+        $popup.Placement = "Absolute"
+        $popup.HorizontalOffset = $screenPoint.X
+        $popup.VerticalOffset = $screenPoint.Y
+        $popup.Child = $menu
+
+        $menu.Add_Closed({
+            param($s, $e)
+            $popup.IsOpen = $false
+        })
+
+        $popup.IsOpen = $true
     })
 
     $dragHandler = {
