@@ -4,6 +4,33 @@ Add-Type -AssemblyName WindowsBase
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 
+if (-not ("NativeWindowTools" -as [type])) {
+    Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+
+public static class NativeWindowTools {
+    public static readonly IntPtr HWND_TOPMOST = new IntPtr(-1);
+    public static readonly IntPtr HWND_NOTOPMOST = new IntPtr(-2);
+
+    public const UInt32 SWP_NOSIZE = 0x0001;
+    public const UInt32 SWP_NOMOVE = 0x0002;
+    public const UInt32 SWP_NOACTIVATE = 0x0010;
+    public const UInt32 SWP_SHOWWINDOW = 0x0040;
+
+    [DllImport("user32.dll", SetLastError = true)]
+    public static extern bool SetWindowPos(
+        IntPtr hWnd,
+        IntPtr hWndInsertAfter,
+        int X,
+        int Y,
+        int cx,
+        int cy,
+        UInt32 uFlags);
+}
+"@
+}
+
 $ErrorActionPreference = "Continue"
 
 $script:AppDir = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -30,6 +57,10 @@ $script:MinimaxRemoteState = @{
 $script:CodexEnabled = $true
 $script:MinimaxEnabled = $true
 $script:CompactMode = $false
+$script:TopmostEnabled = $true
+$script:UsageSnapshot = $null
+$script:StartupRefreshTimer = $null
+$script:CompactTopmostTimer = $null
 $script:FullWidgetHeight = $script:WidgetHeight
 $script:UsageFloorState = @{
     WindowKey = ""
@@ -168,6 +199,7 @@ function Read-State {
         opacity = 1.0
         refreshSeconds = 3
         compactMode = $false
+        usageSnapshot = $null
         usageFloor = $null
         providers = [ordered]@{
             codex = $true
@@ -203,6 +235,67 @@ function Get-ObjectValue($object, $name, $fallback = $null) {
     }
 
     return $property.Value
+}
+
+function Set-WindowTopmost($window) {
+    if ($null -eq $window) {
+        return
+    }
+
+    $isTopmost = ($script:CompactMode -or $script:TopmostEnabled)
+    $window.Topmost = $isTopmost
+
+    try {
+        $handle = ([System.Windows.Interop.WindowInteropHelper]::new($window)).Handle
+        if ($handle -ne [IntPtr]::Zero) {
+            $insertAfter = if ($isTopmost) { [NativeWindowTools]::HWND_TOPMOST } else { [NativeWindowTools]::HWND_NOTOPMOST }
+            [NativeWindowTools]::SetWindowPos(
+                $handle,
+                $insertAfter,
+                0,
+                0,
+                0,
+                0,
+                [NativeWindowTools]::SWP_NOMOVE -bor [NativeWindowTools]::SWP_NOSIZE -bor [NativeWindowTools]::SWP_NOACTIVATE -bor [NativeWindowTools]::SWP_SHOWWINDOW
+            ) | Out-Null
+        }
+    } catch {
+    }
+}
+
+function Sync-CompactTopmostTimer($window) {
+    if ($script:CompactMode) {
+        if ($null -eq $script:CompactTopmostTimer) {
+            $script:CompactTopmostTimer = New-Object System.Windows.Threading.DispatcherTimer
+            $script:CompactTopmostTimer.Interval = [TimeSpan]::FromMilliseconds(700)
+            $script:CompactTopmostTimer.Tag = $window
+            $script:CompactTopmostTimer.Add_Tick({
+                param($sender)
+                if (-not $script:CompactMode) {
+                    $sender.Stop()
+                    $script:CompactTopmostTimer = $null
+                    return
+                }
+
+                Set-WindowTopmost $sender.Tag
+            })
+        } else {
+            $script:CompactTopmostTimer.Tag = $window
+        }
+
+        if (-not $script:CompactTopmostTimer.IsEnabled) {
+            $script:CompactTopmostTimer.Start()
+        }
+        Set-WindowTopmost $window
+        return
+    }
+
+    if ($null -ne $script:CompactTopmostTimer) {
+        $script:CompactTopmostTimer.Stop()
+        $script:CompactTopmostTimer = $null
+    }
+
+    Set-WindowTopmost $window
 }
 
 function Read-Config {
@@ -272,9 +365,11 @@ function Build-ProviderContextMenu($window, $controls) {
     $topmostItem = New-Object System.Windows.Controls.MenuItem
     $topmostItem.Header = "Always on Top"
     $topmostItem.IsCheckable = $true
-    $topmostItem.IsChecked = $window.Topmost
+    $topmostItem.IsChecked = ($script:CompactMode -or $script:TopmostEnabled)
+    $topmostItem.IsEnabled = -not $script:CompactMode
     $topmostItem.Add_Click({
-        $window.Topmost = -not $window.Topmost
+        $script:TopmostEnabled = -not $script:TopmostEnabled
+        Set-WindowTopmost $window
         Sync-ProviderState
     })
 
@@ -344,8 +439,9 @@ function Sync-ProviderState {
     $state.providers.codex = $script:CodexEnabled
     $state.providers.minimax = $script:MinimaxEnabled
     $state | Add-Member -MemberType NoteProperty -Name compactMode -Value $script:CompactMode -Force
+    $state | Add-Member -MemberType NoteProperty -Name topmost -Value $script:TopmostEnabled -Force
 
-    $json = $state | ConvertTo-Json -Depth 4
+    $json = $state | ConvertTo-Json -Depth 8
     try {
         [System.IO.File]::WriteAllText($script:StatePath, $json, [System.Text.Encoding]::UTF8)
     } catch {
@@ -357,10 +453,11 @@ function Save-State($window) {
         $state = [ordered]@{
             left = [Math]::Round($window.Left)
             top = [Math]::Round($window.Top)
-            topmost = [bool]$window.Topmost
+            topmost = [bool]$script:TopmostEnabled
             opacity = 1.0
             refreshSeconds = 3
             compactMode = $script:CompactMode
+            usageSnapshot = $script:UsageSnapshot
             usageFloor = [ordered]@{
                 windowKey = if ($script:UsageFloorState.WindowKey) { [string]$script:UsageFloorState.WindowKey } else { "" }
                 primaryUsed = if ($null -ne $script:UsageFloorState.PrimaryUsed) { [double]$script:UsageFloorState.PrimaryUsed } else { $null }
@@ -371,9 +468,185 @@ function Save-State($window) {
                 minimax = $script:MinimaxEnabled
             }
         }
-        $json = $state | ConvertTo-Json -Depth 4
+        $json = $state | ConvertTo-Json -Depth 8
         [System.IO.File]::WriteAllText($script:StatePath, $json, [System.Text.Encoding]::UTF8)
     } catch {
+    }
+}
+
+function Convert-ToDateTimeOrNull($value) {
+    if ($null -eq $value) {
+        return $null
+    }
+
+    if ($value -is [DateTime]) {
+        return [DateTime]$value
+    }
+
+    if ($value -is [DateTimeOffset]) {
+        return ([DateTimeOffset]$value).LocalDateTime
+    }
+
+    try {
+        return ([DateTimeOffset]::Parse($value.ToString(), [Globalization.CultureInfo]::InvariantCulture)).LocalDateTime
+    } catch {
+        try {
+            return [DateTime]::Parse($value.ToString(), [Globalization.CultureInfo]::InvariantCulture)
+        } catch {
+            return $null
+        }
+    }
+}
+
+function New-LimitSnapshot($limit) {
+    if (-not $limit) {
+        return $null
+    }
+
+    return [ordered]@{
+        used_percent = Convert-ToNumber (Get-ObjectValue $limit "used_percent" 0)
+        resets_at = Convert-ToInt64 (Get-ObjectValue $limit "resets_at" 0)
+        window_minutes = Convert-ToInt64 (Get-ObjectValue $limit "window_minutes" 0)
+        total = Convert-ToNullableNumber (Get-ObjectValue $limit "total" $null)
+        remaining = Convert-ToNullableNumber (Get-ObjectValue $limit "remaining" $null)
+        used = Convert-ToNullableNumber (Get-ObjectValue $limit "used" $null)
+    }
+}
+
+function Restore-LimitSnapshot($snapshot) {
+    if (-not $snapshot) {
+        return $null
+    }
+
+    return [pscustomobject]@{
+        used_percent = Convert-ToNumber (Get-ObjectValue $snapshot "used_percent" 0)
+        resets_at = Convert-ToInt64 (Get-ObjectValue $snapshot "resets_at" 0)
+        window_minutes = Convert-ToInt64 (Get-ObjectValue $snapshot "window_minutes" 0)
+        total = Convert-ToNullableNumber (Get-ObjectValue $snapshot "total" $null)
+        remaining = Convert-ToNullableNumber (Get-ObjectValue $snapshot "remaining" $null)
+        used = Convert-ToNullableNumber (Get-ObjectValue $snapshot "used" $null)
+    }
+}
+
+function New-TokenUsageSnapshot($usage) {
+    if (-not $usage) {
+        return $null
+    }
+
+    return [ordered]@{
+        input = Convert-ToInt64 (Get-ObjectValue $usage "input" 0)
+        cached = Convert-ToInt64 (Get-ObjectValue $usage "cached" 0)
+        output = Convert-ToInt64 (Get-ObjectValue $usage "output" 0)
+        reasoning = Convert-ToInt64 (Get-ObjectValue $usage "reasoning" 0)
+        total = Convert-ToInt64 (Get-ObjectValue $usage "total" 0)
+    }
+}
+
+function Restore-TokenUsageSnapshot($snapshot) {
+    if (-not $snapshot) {
+        return $null
+    }
+
+    return [pscustomobject]@{
+        input = Convert-ToInt64 (Get-ObjectValue $snapshot "input" 0)
+        cached = Convert-ToInt64 (Get-ObjectValue $snapshot "cached" 0)
+        output = Convert-ToInt64 (Get-ObjectValue $snapshot "output" 0)
+        reasoning = Convert-ToInt64 (Get-ObjectValue $snapshot "reasoning" 0)
+        total = Convert-ToInt64 (Get-ObjectValue $snapshot "total" 0)
+    }
+}
+
+function New-UsageObjectSnapshot($usage) {
+    if (-not $usage) {
+        return $null
+    }
+
+    $updated = Get-ObjectValue $usage "updated" (Get-Date)
+    if ($updated -and -not ($updated -is [DateTime]) -and -not ($updated -is [DateTimeOffset])) {
+        $updated = Convert-ToDateTimeOrNull $updated
+    }
+    if (-not $updated) {
+        $updated = Get-Date
+    }
+
+    return [ordered]@{
+        ok = [bool](Get-ObjectValue $usage "ok" $false)
+        configured = Get-ObjectValue $usage "configured" $null
+        message = Get-ObjectValue $usage "message" $null
+        plan = Get-ObjectValue $usage "plan" $null
+        source = Get-ObjectValue $usage "source" $null
+        updated = $updated.ToString("o")
+        isStale = [bool](Get-ObjectValue $usage "isStale" $false)
+        staleText = Get-ObjectValue $usage "staleText" ""
+        error = Get-ObjectValue $usage "error" $null
+        primaryDelta = Convert-ToNullableNumber (Get-ObjectValue $usage "primaryDelta" $null)
+        secondaryDelta = Convert-ToNullableNumber (Get-ObjectValue $usage "secondaryDelta" $null)
+        primaryDeltaText = Get-ObjectValue $usage "primaryDeltaText" $null
+        secondaryDeltaText = Get-ObjectValue $usage "secondaryDeltaText" $null
+        primary = New-LimitSnapshot (Get-ObjectValue $usage "primary" $null)
+        secondary = New-LimitSnapshot (Get-ObjectValue $usage "secondary" $null)
+    }
+}
+
+function Restore-UsageObjectSnapshot($snapshot) {
+    if (-not $snapshot) {
+        return $null
+    }
+
+    $updated = Convert-ToDateTimeOrNull (Get-ObjectValue $snapshot "updated" $null)
+    if (-not $updated) {
+        $updated = Get-Date
+    }
+
+    return [pscustomobject]@{
+        ok = [bool](Get-ObjectValue $snapshot "ok" $false)
+        configured = Get-ObjectValue $snapshot "configured" $null
+        message = Get-ObjectValue $snapshot "message" $null
+        plan = Get-ObjectValue $snapshot "plan" $null
+        source = Get-ObjectValue $snapshot "source" $null
+        updated = $updated
+        isStale = [bool](Get-ObjectValue $snapshot "isStale" $false)
+        staleText = Get-ObjectValue $snapshot "staleText" ""
+        error = Get-ObjectValue $snapshot "error" $null
+        primaryDelta = Convert-ToNullableNumber (Get-ObjectValue $snapshot "primaryDelta" $null)
+        secondaryDelta = Convert-ToNullableNumber (Get-ObjectValue $snapshot "secondaryDelta" $null)
+        primaryDeltaText = Get-ObjectValue $snapshot "primaryDeltaText" $null
+        secondaryDeltaText = Get-ObjectValue $snapshot "secondaryDeltaText" $null
+        primary = Restore-LimitSnapshot (Get-ObjectValue $snapshot "primary" $null)
+        secondary = Restore-LimitSnapshot (Get-ObjectValue $snapshot "secondary" $null)
+    }
+}
+
+function New-UsageSnapshot($codex, $minimax, $activity) {
+    return [ordered]@{
+        savedAt = (Get-Date).ToString("o")
+        codex = New-UsageObjectSnapshot $codex
+        minimax = New-UsageObjectSnapshot $minimax
+        activity = [ordered]@{
+            latestCall = New-TokenUsageSnapshot (Get-ObjectValue $activity "LatestCall" $null)
+            latestTurn = New-TokenUsageSnapshot (Get-ObjectValue $activity "LatestTurn" $null)
+            recent = New-TokenUsageSnapshot (Get-ObjectValue $activity "Recent" $null)
+            observedAt = if ($activity -and $activity.ObservedAt) { $activity.ObservedAt.ToString("o") } else { $null }
+        }
+    }
+}
+
+function Restore-UsageSnapshot($snapshot) {
+    if (-not $snapshot) {
+        return $null
+    }
+
+    $activity = Get-ObjectValue $snapshot "activity" $null
+    $observedAt = if ($activity) { Convert-ToDateTimeOrNull (Get-ObjectValue $activity "observedAt" $null) } else { $null }
+    return [pscustomobject]@{
+        Codex = Restore-UsageObjectSnapshot (Get-ObjectValue $snapshot "codex" $null)
+        Minimax = Restore-UsageObjectSnapshot (Get-ObjectValue $snapshot "minimax" $null)
+        Activity = [pscustomobject]@{
+            LatestCall = Restore-TokenUsageSnapshot (Get-ObjectValue $activity "latestCall" $null)
+            LatestTurn = Restore-TokenUsageSnapshot (Get-ObjectValue $activity "latestTurn" $null)
+            Recent = Restore-TokenUsageSnapshot (Get-ObjectValue $activity "recent" $null)
+            ObservedAt = $observedAt
+        }
     }
 }
 
@@ -744,7 +1017,6 @@ function Get-MinimaxRemoteSettings {
         $timeoutSeconds = 10
     }
 
-
     $authHeaderName = Get-EnvValue "MINIMAX_QUOTA_AUTH_HEADER"
     if (-not $authHeaderName) {
         $authHeaderName = Get-FirstObjectValue $minimax @("authHeaderName", "tokenHeader")
@@ -951,6 +1223,7 @@ function Convert-MinimaxDurationSeconds($value, $defaultWindowMinutes) {
 
     return [double]$number
 }
+
 function Get-MinimaxPayloadRoot($raw) {
     $current = $raw
     for ($index = 0; $index -lt 3; $index++) {
@@ -1985,7 +2258,7 @@ function Format-CompactRemaining($resetSeconds) {
 }
 
 function Format-CompactTooltip($name, $usage, $activity) {
-    if (-not $usage -or -not $usage.ok) {
+    if (-not $usage -or -not $usage.ok -or -not $usage.primary -or -not $usage.secondary) {
         return "{0}: waiting for telemetry" -f $name
     }
 
@@ -2085,12 +2358,20 @@ function Move-WindowKeepingBottom($window, $oldBottom) {
     }
 
     $newTop = $oldBottom - $window.Height
-    $workArea = [System.Windows.SystemParameters]::WorkArea
-    if ($newTop -lt $workArea.Top) {
-        $newTop = $workArea.Top
+    if ($script:CompactMode) {
+        $screenTop = [System.Windows.SystemParameters]::VirtualScreenTop
+        $screenBottom = $screenTop + [System.Windows.SystemParameters]::VirtualScreenHeight
+    } else {
+        $workArea = [System.Windows.SystemParameters]::WorkArea
+        $screenTop = $workArea.Top
+        $screenBottom = $workArea.Bottom
     }
 
-    $maxTop = $workArea.Bottom - $window.Height
+    if ($newTop -lt $screenTop) {
+        $newTop = $screenTop
+    }
+
+    $maxTop = $screenBottom - $window.Height
     if ($newTop -gt $maxTop) {
         $newTop = $maxTop
     }
@@ -2138,6 +2419,8 @@ function Set-WidgetMode($window, $controls, $compact, $saveState = $true, $prese
         Move-WindowKeepingBottom $window $oldBottom
     }
 
+    Sync-CompactTopmostTimer $window
+
     if ($saveState) {
         Save-State $window
     }
@@ -2148,35 +2431,46 @@ function Toggle-WidgetMode($window, $controls) {
     Set-WidgetMode $window $controls (-not $script:CompactMode) $true $wasCompact
 }
 
-function Update-Widget($controls) {
-    $usage = Get-CodexUsage
-    $activity = Get-TokenActivitySummary
+function Format-ProviderUpdatedText($usage) {
+    if (-not $usage -or -not $usage.ok -or -not $usage.updated) {
+        return "not updated"
+    }
 
-    if (-not $usage.ok) {
+    $updated = Convert-ToDateTimeOrNull $usage.updated
+    if (-not $updated) {
+        return "not updated"
+    }
+
+    return $updated.ToString("HH:mm:ss")
+}
+
+function Apply-WidgetData($controls, $usage, $minimax, $activity) {
+    if (-not $usage -or -not $usage.ok -or -not $usage.primary -or -not $usage.secondary) {
         Update-LimitRow $controls.Current $null "Waiting for Codex" "No fresh data"
         Update-LimitRow $controls.Weekly $null "Waiting for Codex" ""
-        Update-LimitRow $controls.MinimaxCurrent $null "Waiting for Minimax" ""
-        Update-LimitRow $controls.MinimaxWeekly $null "" ""
         $hint = Get-UsageHint $null $null $false
         $controls.CodexHint.Text = $hint.Text
         $controls.CodexHint.Foreground = Get-Brush $hint.Color
         $controls.CodexActivity.Text = Format-ActivityText $null $activity
         $controls.CodexActivity.ToolTip = Format-ActivityTooltip $null $activity
         Update-CompactProviderPanel $controls.CompactCodex $null "Codex" $activity
-        Update-CompactProviderPanel $controls.CompactMinimax $null "MiniMax" $null
-        $controls.Updated.Text = "Updated " + (Get-Date).ToString("HH:mm:ss")
-        return
+    } else {
+        $currentReset = Format-BaliReset $usage.primary.resets_at
+        $currentLeft = Format-Remaining $usage.primary.resets_at
+        $weeklyReset = Format-LocalReset $usage.secondary.resets_at
+        $weeklyLeft = Format-Remaining $usage.secondary.resets_at
+        Update-LimitRow $controls.Current $usage.primary $currentReset $currentLeft
+        Update-LimitRow $controls.Weekly $usage.secondary $weeklyReset $weeklyLeft
+
+        $hint = Get-UsageHint $usage.primary $usage.secondary $usage.isStale
+        $controls.CodexHint.Text = $hint.Text
+        $controls.CodexHint.Foreground = Get-Brush $hint.Color
+        $controls.CodexActivity.Text = Format-ActivityText $usage $activity
+        $controls.CodexActivity.ToolTip = Format-ActivityTooltip $usage $activity
+        Update-CompactProviderPanel $controls.CompactCodex $usage "Codex" $activity
     }
 
-    $currentReset = Format-BaliReset $usage.primary.resets_at
-    $currentLeft = Format-Remaining $usage.primary.resets_at
-    $weeklyReset = Format-LocalReset $usage.secondary.resets_at
-    $weeklyLeft = Format-Remaining $usage.secondary.resets_at
-    Update-LimitRow $controls.Current $usage.primary $currentReset $currentLeft
-    Update-LimitRow $controls.Weekly $usage.secondary $weeklyReset $weeklyLeft
-
-    $minimax = Get-MinimaxUsage
-    if ($minimax.ok) {
+    if ($minimax -and $minimax.ok -and $minimax.primary -and $minimax.secondary) {
         $currentReset = Format-LocalReset $minimax.primary.resets_at
         $currentLeft = Format-Remaining $minimax.primary.resets_at
         $weeklyReset = Format-LocalReset $minimax.secondary.resets_at
@@ -2188,14 +2482,33 @@ function Update-Widget($controls) {
         Update-LimitRow $controls.MinimaxWeekly $null "" ""
     }
 
-    $hint = Get-UsageHint $usage.primary $usage.secondary $usage.isStale
-    $controls.CodexHint.Text = $hint.Text
-    $controls.CodexHint.Foreground = Get-Brush $hint.Color
-    $controls.CodexActivity.Text = Format-ActivityText $usage $activity
-    $controls.CodexActivity.ToolTip = Format-ActivityTooltip $usage $activity
-    Update-CompactProviderPanel $controls.CompactCodex $usage "Codex" $activity
     Update-CompactProviderPanel $controls.CompactMinimax $minimax "MiniMax" $null
-    $controls.Updated.Text = "Updated " + $usage.updated.ToString("HH:mm:ss")
+    $controls.CodexUpdated.Text = Format-ProviderUpdatedText $usage
+    $controls.MinimaxUpdated.Text = Format-ProviderUpdatedText $minimax
+    $controls.Updated.Text = if ($usage -and $usage.ok) { "Updated " + (Format-ProviderUpdatedText $usage) } else { "Updated " + (Get-Date).ToString("HH:mm:ss") }
+}
+
+function Apply-CachedUsageSnapshot($controls, $snapshot) {
+    $restored = Restore-UsageSnapshot $snapshot
+    if (-not $restored) {
+        return $false
+    }
+
+    Apply-WidgetData $controls $restored.Codex $restored.Minimax $restored.Activity
+    return $true
+}
+
+function Update-Widget($controls) {
+    $usage = Get-CodexUsage
+    $activity = Get-TokenActivitySummary
+    $minimax = Get-MinimaxUsage
+
+    Apply-WidgetData $controls $usage $minimax $activity
+
+    if (($usage -and $usage.ok) -or ($minimax -and $minimax.ok)) {
+        $script:UsageSnapshot = New-UsageSnapshot $usage $minimax $activity
+        Save-State $controls.Window
+    }
 }
 
 function New-TrayIcon($window) {
@@ -2216,6 +2529,7 @@ function New-TrayIcon($window) {
     $menu.Items.Add($dashboardItem) | Out-Null
     $menu.Items.Add($exitItem) | Out-Null
     $tray.ContextMenuStrip = $menu
+    $tray.Tag = $menu
 
     $showAction = {
         Show-UsageWindow $window
@@ -2245,6 +2559,8 @@ function Build-Widget {
         $script:CodexEnabled = $true
     }
     $script:CompactMode = [bool](Get-ObjectValue $state "compactMode" $false)
+    $script:TopmostEnabled = [bool](Get-ObjectValue $state "topmost" $true)
+    $script:UsageSnapshot = Get-ObjectValue $state "usageSnapshot" $null
 
     $window = New-Object System.Windows.Window
     $window.Title = "Codex Usage Meter"
@@ -2265,7 +2581,7 @@ function Build-Widget {
     $window.UseLayoutRounding = $true
     $window.SnapsToDevicePixels = $true
     $window.ResizeMode = "NoResize"
-    $window.Topmost = [bool]$state.topmost
+    Set-WindowTopmost $window
     $window.Left = [double]$state.left
     $window.Top = [double]$state.top
     $window.Opacity = 1.0
@@ -2312,8 +2628,18 @@ function Build-Widget {
     $codexInner = New-Object System.Windows.Controls.StackPanel
     $codexInner.Margin = "10,8,10,8"
 
+    $codexHeader = New-Object System.Windows.Controls.Grid
+    $codexHeader.ColumnDefinitions.Add((New-Object System.Windows.Controls.ColumnDefinition -Property @{ Width = "Auto" }))
+    $codexHeader.ColumnDefinitions.Add((New-Object System.Windows.Controls.ColumnDefinition -Property @{ Width = "Auto" }))
+
     $codexLabel = New-TextBlock "CODEX" 9.5 "SemiBold" "#6FE8FF"
     $codexLabel.Opacity = 0.85
+    $codexUpdated = New-TextBlock "not updated" 9 "Regular" "#AAB7BD"
+    $codexUpdated.Margin = "8,0,0,0"
+    $codexUpdated.Opacity = 0.62
+    [System.Windows.Controls.Grid]::SetColumn($codexUpdated, 1)
+    $codexHeader.Children.Add($codexLabel) | Out-Null
+    $codexHeader.Children.Add($codexUpdated) | Out-Null
 
     $current = New-LimitRow "CURRENT SESSION" $false 5
     $weekly = New-LimitRow "WEEKLY" $false 7
@@ -2326,7 +2652,7 @@ function Build-Widget {
     $codexHint.Margin = "0,2,0,0"
     $codexHint.Opacity = 0.78
 
-    $codexInner.Children.Add($codexLabel) | Out-Null
+    $codexInner.Children.Add($codexHeader) | Out-Null
     $codexInner.Children.Add($current.panel) | Out-Null
     $codexInner.Children.Add($weekly.panel) | Out-Null
     $codexInner.Children.Add($codexActivity) | Out-Null
@@ -2349,12 +2675,22 @@ function Build-Widget {
     $minimaxInner = New-Object System.Windows.Controls.StackPanel
     $minimaxInner.Margin = "10,6,10,6"
 
+    $minimaxHeader = New-Object System.Windows.Controls.Grid
+    $minimaxHeader.ColumnDefinitions.Add((New-Object System.Windows.Controls.ColumnDefinition -Property @{ Width = "Auto" }))
+    $minimaxHeader.ColumnDefinitions.Add((New-Object System.Windows.Controls.ColumnDefinition -Property @{ Width = "Auto" }))
+
     $minimaxLabel = New-TextBlock "MINIMAX" 9.5 "SemiBold" "#FF8A3D"
     $minimaxLabel.Opacity = 0.85
+    $minimaxUpdated = New-TextBlock "not updated" 9 "Regular" "#AAB7BD"
+    $minimaxUpdated.Margin = "8,0,0,0"
+    $minimaxUpdated.Opacity = 0.62
+    [System.Windows.Controls.Grid]::SetColumn($minimaxUpdated, 1)
+    $minimaxHeader.Children.Add($minimaxLabel) | Out-Null
+    $minimaxHeader.Children.Add($minimaxUpdated) | Out-Null
 
     $minimaxCurrent = New-LimitRow "CURRENT SESSION" $false 5
     $minimaxWeekly = New-LimitRow "WEEKLY" $false 7
-    $minimaxInner.Children.Add($minimaxLabel) | Out-Null
+    $minimaxInner.Children.Add($minimaxHeader) | Out-Null
     $minimaxInner.Children.Add($minimaxCurrent.panel) | Out-Null
     $minimaxInner.Children.Add($minimaxWeekly.panel) | Out-Null
 
@@ -2389,7 +2725,17 @@ function Build-Widget {
 
     $root.Add_Loaded({
         Sync-ProviderVisibility $controls
-        Update-Widget $controls
+        Apply-CachedUsageSnapshot $controls $script:UsageSnapshot | Out-Null
+
+        $script:StartupRefreshTimer = New-Object System.Windows.Threading.DispatcherTimer
+        $script:StartupRefreshTimer.Interval = [TimeSpan]::FromMilliseconds(120)
+        $script:StartupRefreshTimer.Add_Tick({
+            param($sender)
+            $sender.Stop()
+            $script:StartupRefreshTimer = $null
+            Update-Widget $controls
+        })
+        $script:StartupRefreshTimer.Start()
     })
 
     $controls = [pscustomobject]@{
@@ -2407,33 +2753,26 @@ function Build-Widget {
         CompactMinimax = $compactMinimax
         CodexActivity = $codexActivity
         CodexHint = $codexHint
+        CodexUpdated = $codexUpdated
+        MinimaxUpdated = $minimaxUpdated
         Updated = $updated
     }
 
     $tray = New-TrayIcon $window
 
-    $outer.Add_MouseRightButtonUp({
+    $contextMenuOpeningHandler = {
         param($sender, $event)
-        $menu = Build-ProviderContextMenu $window $controls
+        $sender.ContextMenu = Build-ProviderContextMenu $window $controls
+    }
 
-        # Get mouse position in screen coordinates
-        $mousePos = [System.Windows.Input.Mouse]::GetPosition($window)
-        $screenPoint = $window.PointToScreen($mousePos)
-
-        $popup = New-Object System.Windows.Controls.Primitives.Popup
-        $popup.PlacementTarget = $window
-        $popup.Placement = "Absolute"
-        $popup.HorizontalOffset = $screenPoint.X
-        $popup.VerticalOffset = $screenPoint.Y
-        $popup.Child = $menu
-
-        $menu.Add_Closed({
-            param($s, $e)
-            $popup.IsOpen = $false
-        })
-
-        $popup.IsOpen = $true
-    })
+    $outer.ContextMenu = Build-ProviderContextMenu $window $controls
+    $root.ContextMenu = Build-ProviderContextMenu $window $controls
+    $content.ContextMenu = Build-ProviderContextMenu $window $controls
+    $compactContent.ContextMenu = Build-ProviderContextMenu $window $controls
+    $outer.Add_ContextMenuOpening($contextMenuOpeningHandler)
+    $root.Add_ContextMenuOpening($contextMenuOpeningHandler)
+    $content.Add_ContextMenuOpening($contextMenuOpeningHandler)
+    $compactContent.Add_ContextMenuOpening($contextMenuOpeningHandler)
 
     $dragHandler = {
         param($sender, $event)
@@ -2450,9 +2789,26 @@ function Build-Widget {
     $outer.Add_MouseLeftButtonDown($dragHandler)
 
     $window.Add_LocationChanged({
+        if ($script:CompactMode) {
+            Sync-CompactTopmostTimer $window
+        }
         Save-State $window
     })
+    $window.Add_Deactivated({
+        if ($script:CompactMode) {
+            Sync-CompactTopmostTimer $window
+        }
+    })
+    $window.Add_Activated({
+        if ($script:CompactMode) {
+            Sync-CompactTopmostTimer $window
+        }
+    })
     $window.Add_Closed({
+        if ($null -ne $script:CompactTopmostTimer) {
+            $script:CompactTopmostTimer.Stop()
+            $script:CompactTopmostTimer = $null
+        }
         Save-State $window
         if ($null -ne $tray) {
             $tray.Visible = $false
