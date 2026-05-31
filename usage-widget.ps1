@@ -2501,7 +2501,11 @@ function Apply-CachedUsageSnapshot($controls, $snapshot) {
 function Update-Widget($controls) {
     $usage = Get-CodexUsage
     $activity = Get-TokenActivitySummary
-    $minimax = Get-MinimaxUsage
+    $minimax = if ($script:MinimaxEnabled) {
+        Get-MinimaxUsage
+    } else {
+        $script:MinimaxRemoteState.Usage
+    }
 
     Apply-WidgetData $controls $usage $minimax $activity
 
